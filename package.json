@@ -1,0 +1,47 @@
+{
+  "type": "module",
+  "name": "@krotovm/gitlab-ai-review",
+  "version": "1.0.0",
+  "description": "CLI tool to generate AI code reviews for GitLab merge requests and local diffs.",
+  "main": "dist/cli.js",
+  "bin": {
+    "gitlab-ai-review": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:ts": "tsc",
+    "prepublishOnly": "pnpm build:ts"
+  },
+  "keywords": [
+    "gitlab",
+    "merge-request",
+    "code-review",
+    "openai",
+    "cli"
+  ],
+  "author": "KrotovM",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KrotovM/gitlab-ai-mr-reviewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KrotovM/gitlab-ai-mr-reviewer/issues"
+  },
+  "homepage": "https://github.com/KrotovM/gitlab-ai-mr-reviewer#readme",
+  "dependencies": {
+    "openai": "^4.47.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.4.4",
+    "typescript": "^5.2.2"
+  },
+  "packageManager": "pnpm@8.15.4+sha256.cea6d0bdf2de3a0549582da3983c70c92ffc577ff4410cbf190817ddc35137c2"
+}
