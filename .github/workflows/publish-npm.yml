@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Enable corepack (pnpm)
@@ -30,6 +30,12 @@ jobs:
 
       - name: Build
         run: pnpm build:ts
+
+      - name: Debug npm identity
+        run: |
+          node -v
+          npm -v
+          npm whoami || true
 
       - name: Publish
         run: npm publish --access public --provenance
