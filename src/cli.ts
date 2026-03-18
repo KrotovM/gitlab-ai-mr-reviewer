@@ -27,9 +27,10 @@ function printHelp (): void {
       'Env vars:',
       '  OPENAI_API_KEY (required)  OpenAI API key.',
       '  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.',
+      '  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (recommended for private projects).',
       '',
       'CI-only env vars (provided by GitLab):',
-      '  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN',
+      '  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN (only if PROJECT_ACCESS_TOKEN is not set)',
       '',
       'Notes:',
       '  - If no mode is specified, it defaults to --ci when CI_MERGE_REQUEST_IID is set, otherwise --worktree.',
@@ -51,6 +52,13 @@ function envOrDefault (name: string, defaultValue: string): string {
   if (value == null) return defaultValue
   const trimmed = value.trim()
   return trimmed === '' ? defaultValue : trimmed
+}
+
+function envOrUndefined (name: string): string | undefined {
+  const value = process.env[name]
+  if (value == null) return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
 }
 
 type Mode = 'ci' | 'worktree' | 'last-commit'
@@ -148,10 +156,15 @@ async function main (): Promise<void> {
   const ciApiV4Url = requiredEnv('CI_API_V4_URL')
   const projectId = requiredEnv('CI_PROJECT_ID')
   const mergeRequestIid = requiredEnv('CI_MERGE_REQUEST_IID')
-  const jobToken = requiredEnv('CI_JOB_TOKEN')
 
   const gitLabBaseUrl = new URL(ciApiV4Url)
-  const headers = { 'JOB-TOKEN': jobToken } as const
+  const projectAccessToken = envOrUndefined('PROJECT_ACCESS_TOKEN') ?? envOrUndefined('GITLAB_TOKEN')
+  const headers: Record<string, string> = {}
+  if (projectAccessToken != null) {
+    headers['PRIVATE-TOKEN'] = projectAccessToken
+  } else {
+    headers['JOB-TOKEN'] = requiredEnv('CI_JOB_TOKEN')
+  }
 
   const mrChanges = await fetchMergeRequestChanges({
     gitLabBaseUrl,

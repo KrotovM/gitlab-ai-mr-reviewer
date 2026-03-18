@@ -16,13 +16,14 @@ This repo now includes a CLI you can run in a dedicated GitLab CI job. It is des
 
 - `OPENAI_API_KEY`
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; examples: `gpt-4o`)
+- `PROJECT_ACCESS_TOKEN` (recommended for private projects; Project or Personal Access Token with `api` scope)
 
 GitLab provides these automatically in CI:
 
 - `CI_API_V4_URL`
 - `CI_PROJECT_ID`
 - `CI_MERGE_REQUEST_IID`
-- `CI_JOB_TOKEN`
+- `CI_JOB_TOKEN` (used only when `PROJECT_ACCESS_TOKEN` is not set)
 
 ### Example `.gitlab-ci.yml`
 
