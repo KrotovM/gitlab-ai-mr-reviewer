@@ -1,6 +1,28 @@
 import type { ChatCompletionMessageParam, ChatCompletion } from 'openai/resources/index.mjs'
 import type { OldFileVersion } from '../gitlab/services.js'
 
+export interface PromptLimits {
+  maxOldFiles: number
+  maxOldFileChars: number
+  maxDiffs: number
+  maxDiffChars: number
+  maxTotalPromptChars: number
+}
+
+export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
+  maxOldFiles: 30,
+  maxOldFileChars: 12000,
+  maxDiffs: 50,
+  maxDiffChars: 16000,
+  maxTotalPromptChars: 220000
+}
+
+function truncateWithMarker (value: string, maxChars: number, markerLabel: string): string {
+  if (value.length <= maxChars) return value
+  const omitted = value.length - maxChars
+  return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`
+}
+
 const QUESTIONS = `\n\nQuestions:\n
 1. Can you summarize the changes in a succinct bullet point list\n
 2. In the diff, are the added or changed code written in a clear and easy to understand way?\n
@@ -11,11 +33,7 @@ const QUESTIONS = `\n\nQuestions:\n
 
 const MESSAGES: ChatCompletionMessageParam[] = [{
   role: 'system',
-  content: 'You are a senior developer reviewing code changes.'
-},
-{
-  role: 'assistant',
-  content: 'Format the response so it renders nicely in GitLab, with nice and organized markdown (use code blocks if needed), and send just the response no comments on the request, when answering include a short version of the question, so we know what it is.'
+  content: 'You are a senior developer reviewing code changes. Format the response so it renders nicely in GitLab, with organized markdown (use code blocks if needed), and send only the review content. Include short question labels so each answer section is easy to identify.'
 }]
 
 export const AI_MODEL_TEMPERATURE = 0.2
@@ -23,24 +41,44 @@ export const AI_MODEL_TEMPERATURE = 0.2
 export interface BuildPromptParameters {
   oldFiles?: OldFileVersion[]
   changes: Array<{ diff: string }>
+  limits?: Partial<PromptLimits>
 
 }
-export const buildPrompt = ({ changes, oldFiles }: BuildPromptParameters): ChatCompletionMessageParam[] => {
-  const hasOldFiles = oldFiles != null && oldFiles.length > 0
+export const buildPrompt = ({ changes, oldFiles, limits }: BuildPromptParameters): ChatCompletionMessageParam[] => {
+  const effectiveLimits: PromptLimits = {
+    ...DEFAULT_PROMPT_LIMITS,
+    ...(limits ?? {})
+  }
+  const oldFilesTrimmed = (oldFiles ?? [])
+    .slice(0, effectiveLimits.maxOldFiles)
+    .map((oldFile) => ({
+      fileName: oldFile.fileName,
+      fileContent: truncateWithMarker(oldFile.fileContent, effectiveLimits.maxOldFileChars, `old file "${oldFile.fileName}"`)
+    }))
+  const diffsTrimmed = changes
+    .slice(0, effectiveLimits.maxDiffs)
+    .map((change, index) => truncateWithMarker(change.diff, effectiveLimits.maxDiffChars, `diff #${index + 1}`))
+
+  const hasOldFiles = oldFilesTrimmed.length > 0
+  const oldFilesText = hasOldFiles ? oldFilesTrimmed.map(oldFile => JSON.stringify(oldFile)).join('\n\n') : '(not provided)'
+  const changesText = diffsTrimmed.join('\n\n')
+
   const content = `
     As a senior developer, review the following code changes and answer code review questions about them. The code changes are provided as git diff strings.
     ${hasOldFiles ? 'The entire file before the change is provided for context. Make sure to keep it as a reference when reviewing the changes.' : 'No full pre-change file context is available; review based on the diff only.'}
+    Input safety constraints were applied to keep payload size bounded. If you see truncation markers, call out potential blind spots in your review.
 
     Files before changes:
-    ${hasOldFiles ? oldFiles!.map(oldFile => JSON.stringify(oldFile)).join('\n\n') : '(not provided)'}
+    ${oldFilesText}
 
     Changes:
-    ${changes.map(change => change.diff).join('\n\n')}
+    ${changesText}
 
     ${QUESTIONS}
     `
 
-  return [...MESSAGES, { role: 'user', content }]
+  const boundedContent = truncateWithMarker(content, effectiveLimits.maxTotalPromptChars, 'prompt payload')
+  return [...MESSAGES, { role: 'user', content: boundedContent }]
 }
 
 const ERROR_ANSWER = 'I\'m sorry, I\'m not feeling well today. Please ask a human to review this code change.'

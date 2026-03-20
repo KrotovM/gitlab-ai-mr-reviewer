@@ -46,10 +46,14 @@ export const fetchPreEditFiles: GitLabFetchFunction<
   try {
     oldFiles = await Promise.allSettled(
       oldFilesRequestUrls.map(async (url) => {
-        const file = await (
-          await fetch(url, { headers: { ...headers } })
-        ).text();
-        return file;
+        const res = await fetch(url, { headers: { ...headers } });
+        if (!res.ok) {
+          const bodyText = await res.text().catch(() => "");
+          throw new Error(
+            `Failed to fetch old file: ${url.toString()} (status ${res.status} ${res.statusText}, body: ${bodyText.slice(0, 500)})`,
+          );
+        }
+        return await res.text();
       }),
     );
   } catch (error: any) {
@@ -60,6 +64,10 @@ export const fetchPreEditFiles: GitLabFetchFunction<
     return new GitLabError({
       name: "MISSING_OLD_FILES",
       message: "Failed to fetch old files",
+      cause: {
+        message: oldFiles.message,
+        stack: oldFiles.stack,
+      },
     });
   }
 
@@ -131,9 +139,32 @@ export const postMergeRequestNote: GitLabFetchFunction<
     aiComment = error;
   }
   if (aiComment instanceof Error || !aiComment.ok) {
+    const responseDetails = await (async () => {
+      if (aiComment instanceof Error) {
+        return {
+          url: commentUrl.toString(),
+          error: {
+            name: aiComment.name,
+            message: aiComment.message,
+            stack: aiComment.stack,
+          },
+        };
+      }
+
+      const bodyText = await aiComment.text().catch(() => "");
+      return {
+        url: commentUrl.toString(),
+        status: aiComment.status,
+        statusText: aiComment.statusText,
+        body: bodyText.slice(0, 4000),
+      };
+    })();
+
     return new GitLabError({
       name: "FAILED_TO_POST_COMMENT",
       message: "Failed to post AI comment",
+      statusCode: aiComment instanceof Error ? 502 : aiComment.status,
+      cause: responseDetails,
     });
   }
 };

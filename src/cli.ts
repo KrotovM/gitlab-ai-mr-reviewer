@@ -3,7 +3,12 @@
 
 import OpenAI from "openai";
 import type { ChatModel } from "openai/resources/index.mjs";
-import { buildAnswer, buildPrompt } from "./prompt/index.js";
+import {
+  buildAnswer,
+  buildPrompt,
+  DEFAULT_PROMPT_LIMITS,
+  type PromptLimits,
+} from "./prompt/index.js";
 import {
   fetchMergeRequestChanges,
   fetchPreEditFiles,
@@ -22,6 +27,7 @@ function printHelp(): void {
       "  gitlab-ai-review --last-commit",
       "  gitlab-ai-review --help",
       "  gitlab-ai-review --debug",
+      "  gitlab-ai-review --ci --ignore-ext=md,lock",
       "",
       "Modes (choose one):",
       "  --ci           Run in GitLab MR pipeline: fetch MR changes and post a new MR note.",
@@ -30,9 +36,16 @@ function printHelp(): void {
       "",
       "Debug:",
       "  --debug        Print full error details (stack, API error fields).",
+      "  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock",
+      "  --max-old-files=30",
+      "  --max-old-file-chars=12000",
+      "  --max-diffs=50",
+      "  --max-diff-chars=16000",
+      "  --max-total-prompt-chars=220000",
       "",
       "Env vars:",
       "  OPENAI_API_KEY (required)  OpenAI API key.",
+      "  OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.",
       "  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.",
       "  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (recommended for private projects).",
       "",
@@ -92,6 +105,100 @@ function hasDebugFlag(argv: string[]): boolean {
   return args.has("--debug");
 }
 
+function parseIgnoreExtensions(argv: string[]): string[] {
+  const parsed: string[] = [];
+  const args = argv.slice(2);
+
+  for (const current of args) {
+    if (current === "--ignore-ext") {
+      throw new Error("Use comma-separated format: --ignore-ext=md,lock");
+    }
+    if (!current.startsWith("--ignore-ext=")) continue;
+    const value = current.slice("--ignore-ext=".length);
+    if (value.trim() === "") continue;
+
+    const pieces = value
+      .split(",")
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean);
+
+    for (const piece of pieces) {
+      parsed.push(piece.startsWith(".") ? piece : `.${piece}`);
+    }
+  }
+
+  return Array.from(new Set(parsed));
+}
+
+function parseNumberFlag(
+  argv: string[],
+  flagName: string,
+  defaultValue: number,
+  minValue: number,
+): number {
+  const prefix = `--${flagName}=`;
+  let value = defaultValue;
+  for (const arg of argv.slice(2)) {
+    if (!arg.startsWith(prefix)) continue;
+    const raw = arg.slice(prefix.length).trim();
+    if (raw === "") {
+      throw new Error(`Missing value for --${flagName}. Expected integer.`);
+    }
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < minValue) {
+      throw new Error(
+        `Invalid value for --${flagName}: "${raw}". Expected integer >= ${minValue}.`,
+      );
+    }
+    value = parsed;
+  }
+  return value;
+}
+
+function parsePromptLimits(argv: string[]): PromptLimits {
+  return {
+    maxOldFiles: parseNumberFlag(
+      argv,
+      "max-old-files",
+      DEFAULT_PROMPT_LIMITS.maxOldFiles,
+      0,
+    ),
+    maxOldFileChars: parseNumberFlag(
+      argv,
+      "max-old-file-chars",
+      DEFAULT_PROMPT_LIMITS.maxOldFileChars,
+      1,
+    ),
+    maxDiffs: parseNumberFlag(argv, "max-diffs", DEFAULT_PROMPT_LIMITS.maxDiffs, 0),
+    maxDiffChars: parseNumberFlag(
+      argv,
+      "max-diff-chars",
+      DEFAULT_PROMPT_LIMITS.maxDiffChars,
+      1,
+    ),
+    maxTotalPromptChars: parseNumberFlag(
+      argv,
+      "max-total-prompt-chars",
+      DEFAULT_PROMPT_LIMITS.maxTotalPromptChars,
+      1,
+    ),
+  };
+}
+
+function hasIgnoredExtension(
+  filePath: string,
+  ignoredExtensions: readonly string[],
+): boolean {
+  const lowerPath = filePath.toLowerCase();
+  return ignoredExtensions.some((ext) => lowerPath.endsWith(ext));
+}
+
+function buildGitExcludePathspecs(
+  ignoredExtensions: readonly string[],
+): string[] {
+  return ignoredExtensions.map((ext) => `:(exclude,glob)**/*${ext}`);
+}
+
 function parseMode(argv: string[]): Mode {
   const args = new Set(argv.slice(2));
   if (args.has("--help") || args.has("-h")) {
@@ -142,8 +249,16 @@ async function runGit(args: string[]): Promise<string> {
 }
 
 async function localDiffWorktree(): Promise<string> {
-  const unstaged = await runGit(["diff"]);
-  const staged = await runGit(["diff", "--staged"]);
+  const ignoreExtensions = parseIgnoreExtensions(process.argv);
+  const pathspecs = buildGitExcludePathspecs(ignoreExtensions);
+  const unstagedArgs =
+    pathspecs.length > 0 ? ["diff", "--", ...pathspecs] : ["diff"];
+  const stagedArgs =
+    pathspecs.length > 0
+      ? ["diff", "--staged", "--", ...pathspecs]
+      : ["diff", "--staged"];
+  const unstaged = await runGit(unstagedArgs);
+  const staged = await runGit(stagedArgs);
   const combined = [staged.trim(), unstaged.trim()]
     .filter(Boolean)
     .join("\n\n");
@@ -151,14 +266,21 @@ async function localDiffWorktree(): Promise<string> {
 }
 
 async function localDiffLastCommit(): Promise<string> {
+  const ignoreExtensions = parseIgnoreExtensions(process.argv);
+  const pathspecs = buildGitExcludePathspecs(ignoreExtensions);
   // show patch for HEAD, but avoid commit message metadata
-  return await runGit(["show", "--format=", "HEAD"]);
+  const args =
+    pathspecs.length > 0
+      ? ["show", "--format=", "HEAD", "--", ...pathspecs]
+      : ["show", "--format=", "HEAD"];
+  return await runGit(args);
 }
 
 async function reviewDiffToConsole(
   diff: string,
   openaiApiKey: string,
   aiModel: ChatModel,
+  promptLimits: PromptLimits,
 ): Promise<void> {
   if (diff.trim() === "") {
     process.stdout.write("No diff found. Skipping review.\n");
@@ -167,6 +289,7 @@ async function reviewDiffToConsole(
 
   const messageParams = buildPrompt({
     changes: [{ diff }],
+    limits: promptLimits,
   });
 
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
@@ -181,6 +304,8 @@ async function reviewDiffToConsole(
 
 async function main(): Promise<void> {
   const mode = parseMode(process.argv);
+  const ignoredExtensions = parseIgnoreExtensions(process.argv);
+  const promptLimits = parsePromptLimits(process.argv);
 
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
 
@@ -188,7 +313,7 @@ async function main(): Promise<void> {
     const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffWorktree();
-    await reviewDiffToConsole(diff, openaiApiKey, aiModel);
+    await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
     return;
   }
 
@@ -196,7 +321,7 @@ async function main(): Promise<void> {
     const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffLastCommit();
-    await reviewDiffToConsole(diff, openaiApiKey, aiModel);
+    await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
     return;
   }
 
@@ -236,7 +361,16 @@ async function main(): Promise<void> {
   if (mrChanges instanceof Error) throw mrChanges;
 
   const changes = mrChanges.changes ?? [];
-  if (changes.length === 0) {
+  const filteredChanges =
+    ignoredExtensions.length === 0
+      ? changes
+      : changes.filter(
+          (change) =>
+            !hasIgnoredExtension(change.new_path, ignoredExtensions) &&
+            !hasIgnoredExtension(change.old_path, ignoredExtensions),
+        );
+
+  if (filteredChanges.length === 0) {
     process.stdout.write(
       "No changes found in merge request. Skipping review.\n",
     );
@@ -245,7 +379,7 @@ async function main(): Promise<void> {
 
   const baseSha = mrChanges.diff_refs?.base_sha;
   const ref = baseSha ?? "HEAD";
-  const changesOldPaths = changes.map((c) => c.old_path);
+  const changesOldPaths = filteredChanges.map((c) => c.old_path);
 
   const oldFiles = await fetchPreEditFiles({
     gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
@@ -257,7 +391,8 @@ async function main(): Promise<void> {
 
   const messageParams = buildPrompt({
     oldFiles,
-    changes: changes.map((c) => ({ diff: c.diff })),
+    changes: filteredChanges.map((c) => ({ diff: c.diff })),
+    limits: promptLimits,
   });
 
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
