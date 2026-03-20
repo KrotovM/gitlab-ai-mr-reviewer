@@ -182,17 +182,19 @@ async function reviewDiffToConsole(
 async function main(): Promise<void> {
   const mode = parseMode(process.argv);
 
-  const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
-  const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
 
   if (mode === "worktree") {
+    const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
+    const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffWorktree();
     await reviewDiffToConsole(diff, openaiApiKey, aiModel);
     return;
   }
 
   if (mode === "last-commit") {
+    const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
+    const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffLastCommit();
     await reviewDiffToConsole(diff, openaiApiKey, aiModel);
     return;
@@ -202,6 +204,7 @@ async function main(): Promise<void> {
     envOrUndefined("PROJECT_ACCESS_TOKEN") ?? envOrUndefined("GITLAB_TOKEN");
 
   const gitlabRequired: string[] = [
+    "OPENAI_API_KEY",
     "CI_API_V4_URL",
     "CI_PROJECT_ID",
     "CI_MERGE_REQUEST_IID",
@@ -211,6 +214,7 @@ async function main(): Promise<void> {
   }
   const gitlabEnvs = requireEnvs(gitlabRequired);
 
+  const openaiApiKey = gitlabEnvs["OPENAI_API_KEY"]!;
   const ciApiV4Url = gitlabEnvs["CI_API_V4_URL"]!;
   const projectId = gitlabEnvs["CI_PROJECT_ID"]!;
   const mergeRequestIid = gitlabEnvs["CI_MERGE_REQUEST_IID"]!;
