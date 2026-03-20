@@ -44,6 +44,11 @@ export interface BuildPromptParameters {
   limits?: Partial<PromptLimits>
 
 }
+
+function trimToBudget (value: string, budget: number, markerLabel: string): string {
+  if (budget <= 0) return ''
+  return truncateWithMarker(value, budget, markerLabel)
+}
 export const buildPrompt = ({ changes, oldFiles, limits }: BuildPromptParameters): ChatCompletionMessageParam[] => {
   const effectiveLimits: PromptLimits = {
     ...DEFAULT_PROMPT_LIMITS,
@@ -63,21 +68,29 @@ export const buildPrompt = ({ changes, oldFiles, limits }: BuildPromptParameters
   const oldFilesText = hasOldFiles ? oldFilesTrimmed.map(oldFile => JSON.stringify(oldFile)).join('\n\n') : '(not provided)'
   const changesText = diffsTrimmed.join('\n\n')
 
-  const content = `
-    As a senior developer, review the following code changes and answer code review questions about them. The code changes are provided as git diff strings.
-    ${hasOldFiles ? 'The entire file before the change is provided for context. Make sure to keep it as a reference when reviewing the changes.' : 'No full pre-change file context is available; review based on the diff only.'}
-    Input safety constraints were applied to keep payload size bounded. If you see truncation markers, call out potential blind spots in your review.
+  const intro = `
+As a senior developer, review the following code changes and answer code review questions about them. The code changes are provided as git diff strings.
+${hasOldFiles ? 'The entire file before the change is provided for context. Make sure to keep it as a reference when reviewing the changes.' : 'No full pre-change file context is available; review based on the diff only.'}
+Input safety constraints were applied to keep payload size bounded. If you see truncation markers, call out potential blind spots in your review.
+`
+  const changesSection = `
+Changes:
+${changesText || '(not provided)'}
+`
+  const oldFilesSection = `
+Files before changes:
+${oldFilesText}
+`
+  const questionsSection = QUESTIONS
 
-    Files before changes:
-    ${oldFilesText}
-
-    Changes:
-    ${changesText}
-
-    ${QUESTIONS}
-    `
-
-  const boundedContent = truncateWithMarker(content, effectiveLimits.maxTotalPromptChars, 'prompt payload')
+  // Keep diffs first in prompt priority. Old file snapshots are added only with remaining budget.
+  const requiredPrefix = `${intro}\n${changesSection}\n`
+  const requiredSuffix = `\n${questionsSection}`
+  const reservedForRequired = requiredPrefix.length + requiredSuffix.length
+  const oldFilesBudget = Math.max(0, effectiveLimits.maxTotalPromptChars - reservedForRequired)
+  const boundedOldFilesSection = trimToBudget(oldFilesSection, oldFilesBudget, 'old files context')
+  const fullPrompt = `${requiredPrefix}${boundedOldFilesSection}${requiredSuffix}`
+  const boundedContent = truncateWithMarker(fullPrompt, effectiveLimits.maxTotalPromptChars, 'prompt payload')
   return [...MESSAGES, { role: 'user', content: boundedContent }]
 }
 

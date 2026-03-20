@@ -187,6 +187,7 @@ export interface MergeRequestChange {
 export interface MergeRequestChangesResponse {
   changes?: MergeRequestChange[];
   diff_refs?: MergeRequestChangesDiffRef;
+  overflow?: boolean;
 }
 
 interface FetchMergeRequestChangesParams {
@@ -201,6 +202,8 @@ export const fetchMergeRequestChanges: GitLabFetchFunction<
   const url = new URL(
     `${gitLabBaseUrl}/projects/${projectId}/merge_requests/${mergeRequestIid}/changes`,
   );
+  // Ask GitLab for raw diffs to reduce truncation on larger merge requests.
+  url.searchParams.set("access_raw_diffs", "true");
   let res: Response | Error;
 
   try {
