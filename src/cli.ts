@@ -223,8 +223,8 @@ function parseMode(argv: string[]): Mode {
   return "worktree";
 }
 
-function logCiStep(message: string): void {
-  process.stdout.write(`[ci] ${message}\n`);
+function logStep(message: string): void {
+  process.stdout.write(`${message}\n`);
 }
 
 async function runGit(args: string[]): Promise<string> {
@@ -314,17 +314,21 @@ async function main(): Promise<void> {
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
 
   if (mode === "worktree") {
+    logStep("Collecting local changes");
     const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffWorktree();
+    logStep(`Requesting AI completion with model: ${aiModel}`);
     await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
     return;
   }
 
   if (mode === "last-commit") {
+    logStep("Collecting HEAD diff");
     const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffLastCommit();
+    logStep(`Requesting AI completion with model: ${aiModel}`);
     await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
     return;
   }
@@ -356,7 +360,7 @@ async function main(): Promise<void> {
     headers["JOB-TOKEN"] = gitlabEnvs["CI_JOB_TOKEN"]!;
   }
 
-  logCiStep("Fetching merge request changes");
+  logStep("Fetching merge request changes");
   const mrChanges = await fetchMergeRequestChanges({
     gitLabBaseUrl,
     headers,
@@ -386,7 +390,7 @@ async function main(): Promise<void> {
   const ref = baseSha ?? "HEAD";
   const changesOldPaths = filteredChanges.map((c) => c.old_path);
 
-  logCiStep("Fetching pre-edit file versions");
+  logStep("Fetching pre-edit file versions");
   const oldFiles = await fetchPreEditFiles({
     gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
     headers,
@@ -395,14 +399,14 @@ async function main(): Promise<void> {
   });
   if (oldFiles instanceof Error) throw oldFiles;
 
-  logCiStep("Building prompt");
+  logStep("Building prompt");
   const messageParams = buildPrompt({
     oldFiles,
     changes: filteredChanges.map((c) => ({ diff: c.diff })),
     limits: promptLimits,
   });
 
-  logCiStep(`Requesting AI completion with model: ${aiModel}`);
+  logStep(`Requesting AI completion with model: ${aiModel}`);
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
   const completion = await generateAICompletion(
     messageParams,
@@ -412,7 +416,7 @@ async function main(): Promise<void> {
 
   const answer = buildAnswer(completion);
 
-  logCiStep("Posting AI review note to merge request");
+  logStep("Posting AI review note to merge request");
   const noteRes = await postMergeRequestNote(
     {
       gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
