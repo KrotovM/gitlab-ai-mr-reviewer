@@ -223,6 +223,10 @@ function parseMode(argv: string[]): Mode {
   return "worktree";
 }
 
+function logCiStep(message: string): void {
+  process.stdout.write(`[ci] ${message}\n`);
+}
+
 async function runGit(args: string[]): Promise<string> {
   const { spawn } = await import("node:child_process");
   return await new Promise((resolve, reject) => {
@@ -352,6 +356,7 @@ async function main(): Promise<void> {
     headers["JOB-TOKEN"] = gitlabEnvs["CI_JOB_TOKEN"]!;
   }
 
+  logCiStep("Fetching merge request changes");
   const mrChanges = await fetchMergeRequestChanges({
     gitLabBaseUrl,
     headers,
@@ -381,6 +386,7 @@ async function main(): Promise<void> {
   const ref = baseSha ?? "HEAD";
   const changesOldPaths = filteredChanges.map((c) => c.old_path);
 
+  logCiStep("Fetching pre-edit file versions");
   const oldFiles = await fetchPreEditFiles({
     gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
     headers,
@@ -389,12 +395,14 @@ async function main(): Promise<void> {
   });
   if (oldFiles instanceof Error) throw oldFiles;
 
+  logCiStep("Building prompt");
   const messageParams = buildPrompt({
     oldFiles,
     changes: filteredChanges.map((c) => ({ diff: c.diff })),
     limits: promptLimits,
   });
 
+  logCiStep(`Requesting AI completion with model: ${aiModel}`);
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
   const completion = await generateAICompletion(
     messageParams,
@@ -404,6 +412,7 @@ async function main(): Promise<void> {
 
   const answer = buildAnswer(completion);
 
+  logCiStep("Posting AI review note to merge request");
   const noteRes = await postMergeRequestNote(
     {
       gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
@@ -420,12 +429,16 @@ async function main(): Promise<void> {
 main().catch((err) => {
   const message = err instanceof Error ? err.message : String(err);
   process.stderr.write(`${message}\n`);
+  const anyErr = err as any;
+
+  if (anyErr?.name === "FAILED_TO_POST_COMMENT" && anyErr?.cause != null) {
+    process.stderr.write(`Cause: ${JSON.stringify(anyErr.cause)}\n`);
+  }
 
   if (hasDebugFlag(process.argv)) {
     if (err instanceof Error && err.stack != null) {
       process.stderr.write(`\nStack:\n${err.stack}\n`);
     }
-    const anyErr = err as any;
     const debugInfo: Record<string, any> = {
       name: anyErr?.name,
       message: anyErr?.message,
