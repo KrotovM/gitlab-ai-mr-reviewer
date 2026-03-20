@@ -3,6 +3,7 @@
 
 import OpenAI from "openai";
 import type { ChatModel } from "openai/resources/index.mjs";
+import type { ChatCompletionMessageParam } from "openai/resources/index.js";
 import {
   buildAnswer,
   buildPrompt,
@@ -10,9 +11,10 @@ import {
   type PromptLimits,
 } from "./prompt/index.js";
 import {
+  fetchFileAtRef,
   fetchMergeRequestChanges,
-  fetchPreEditFiles,
   generateAICompletion,
+  type MergeRequestChange,
   postMergeRequestNote,
 } from "./gitlab/services.js";
 
@@ -37,8 +39,6 @@ function printHelp(): void {
       "Debug:",
       "  --debug        Print full error details (stack, API error fields).",
       "  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock",
-      "  --max-old-files=30",
-      "  --max-old-file-chars=12000",
       "  --max-diffs=50",
       "  --max-diff-chars=16000",
       "  --max-total-prompt-chars=220000",
@@ -157,19 +157,12 @@ function parseNumberFlag(
 
 function parsePromptLimits(argv: string[]): PromptLimits {
   return {
-    maxOldFiles: parseNumberFlag(
+    maxDiffs: parseNumberFlag(
       argv,
-      "max-old-files",
-      DEFAULT_PROMPT_LIMITS.maxOldFiles,
+      "max-diffs",
+      DEFAULT_PROMPT_LIMITS.maxDiffs,
       0,
     ),
-    maxOldFileChars: parseNumberFlag(
-      argv,
-      "max-old-file-chars",
-      DEFAULT_PROMPT_LIMITS.maxOldFileChars,
-      1,
-    ),
-    maxDiffs: parseNumberFlag(argv, "max-diffs", DEFAULT_PROMPT_LIMITS.maxDiffs, 0),
     maxDiffChars: parseNumberFlag(
       argv,
       "max-diff-chars",
@@ -306,6 +299,176 @@ async function reviewDiffToConsole(
   process.stdout.write(`${answer}\n`);
 }
 
+const TOOL_NAME_GET_FILE = "get_file_at_ref";
+const MAX_TOOL_ROUNDS = 12;
+
+function buildReviewMetadata(
+  changes: MergeRequestChange[],
+  refs: { base: string; head: string },
+): string {
+  const files = changes.map((change, index) => ({
+    index: index + 1,
+    old_path: change.old_path,
+    new_path: change.new_path,
+    new_file: change.new_file ?? false,
+    deleted_file: change.deleted_file ?? false,
+    renamed_file: change.renamed_file ?? false,
+  }));
+  return JSON.stringify(
+    {
+      refs,
+      changed_files: files,
+      tool_usage_guidance: [
+        "If diff context is insufficient, call get_file_at_ref.",
+        "Use refs.base to inspect pre-change content and refs.head for current content.",
+        "Prefer targeted file fetches instead of broad context requests.",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+async function reviewMergeRequestWithTools(params: {
+  openaiInstance: OpenAI;
+  aiModel: ChatModel;
+  promptLimits: PromptLimits;
+  changes: MergeRequestChange[];
+  refs: { base: string; head: string };
+  gitLabProjectApiUrl: URL;
+  headers: Record<string, string>;
+}): Promise<string> {
+  const {
+    openaiInstance,
+    aiModel,
+    promptLimits,
+    changes,
+    refs,
+    gitLabProjectApiUrl,
+    headers,
+  } = params;
+
+  const messages: ChatCompletionMessageParam[] = buildPrompt({
+    changes: changes.map((change) => ({ diff: change.diff })),
+    limits: promptLimits,
+  });
+  messages.push({
+    role: "user",
+    content: `Merge request metadata:\n${buildReviewMetadata(changes, refs)}`,
+  });
+
+  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GET_FILE,
+        description:
+          "Fetch raw file content at a specific git ref for review context.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: {
+              type: "string",
+              description: "Repository file path.",
+            },
+            ref: {
+              type: "string",
+              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
+            },
+          },
+          required: ["path", "ref"],
+        },
+      },
+    },
+  ];
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    const completion = await openaiInstance.chat.completions.create({
+      model: aiModel,
+      temperature: 0.2,
+      stream: false,
+      messages,
+      tools,
+      tool_choice: "auto",
+    });
+    const message = completion.choices[0]?.message;
+    if (message == null) return buildAnswer(completion);
+
+    const toolCalls = message.tool_calls ?? [];
+    if (toolCalls.length === 0) return buildAnswer(completion);
+
+    messages.push({
+      role: "assistant",
+      content: message.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const toolCall of toolCalls) {
+      const argsRaw = toolCall.function.arguments ?? "{}";
+      let toolContent: string;
+
+      if (toolCall.function.name !== TOOL_NAME_GET_FILE) {
+        toolContent = JSON.stringify({
+          ok: false,
+          error: `Unknown tool "${toolCall.function.name}"`,
+        });
+      } else {
+        try {
+          const parsed = JSON.parse(argsRaw) as { path?: string; ref?: string };
+          const path = parsed.path?.trim();
+          const ref = parsed.ref?.trim();
+          if (path == null || path === "" || ref == null || ref === "") {
+            toolContent = JSON.stringify({
+              ok: false,
+              error: "Both path and ref are required.",
+            });
+          } else {
+            const fileText = await fetchFileAtRef({
+              gitLabBaseUrl: gitLabProjectApiUrl,
+              headers,
+              filePath: path,
+              ref,
+            });
+            if (fileText instanceof Error) {
+              toolContent = JSON.stringify({
+                ok: false,
+                path,
+                ref,
+                error: fileText.message,
+              });
+            } else {
+              toolContent = JSON.stringify({
+                ok: true,
+                path,
+                ref,
+                content: fileText.slice(0, 30000),
+                truncated: fileText.length > 30000,
+              });
+            }
+          }
+        } catch (error: any) {
+          toolContent = JSON.stringify({
+            ok: false,
+            error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
+            raw: argsRaw,
+          });
+        }
+      }
+
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: toolContent,
+      });
+    }
+  }
+
+  throw new Error(
+    `Exceeded max tool rounds (${MAX_TOOL_ROUNDS}) while generating review`,
+  );
+}
+
 async function main(): Promise<void> {
   const mode = parseMode(process.argv);
   const ignoredExtensions = parseIgnoreExtensions(process.argv);
@@ -386,35 +549,20 @@ async function main(): Promise<void> {
     return;
   }
 
-  const baseSha = mrChanges.diff_refs?.base_sha;
-  const ref = baseSha ?? "HEAD";
-  const changesOldPaths = filteredChanges.map((c) => c.old_path);
-
-  logStep("Fetching pre-edit file versions");
-  const oldFiles = await fetchPreEditFiles({
-    gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
-    headers,
-    changesOldPaths,
-    ref,
-  });
-  if (oldFiles instanceof Error) throw oldFiles;
-
-  logStep("Building prompt");
-  const messageParams = buildPrompt({
-    oldFiles,
-    changes: filteredChanges.map((c) => ({ diff: c.diff })),
-    limits: promptLimits,
-  });
-
   logStep(`Requesting AI completion with model: ${aiModel}`);
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
-  const completion = await generateAICompletion(
-    messageParams,
+  const answer = await reviewMergeRequestWithTools({
     openaiInstance,
     aiModel,
-  );
-
-  const answer = buildAnswer(completion);
+    promptLimits,
+    changes: filteredChanges,
+    refs: {
+      base: mrChanges.diff_refs?.base_sha ?? "HEAD",
+      head: mrChanges.diff_refs?.head_sha ?? "HEAD",
+    },
+    gitLabProjectApiUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+    headers,
+  });
 
   logStep("Posting AI review note to merge request");
   const noteRes = await postMergeRequestNote(

@@ -1,3 +1,5 @@
+<!-- @format -->
+
 # AI Code Reviewer
 
 Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automatically review code changes and output a Markdown review (either to GitLab merge requests via CI, or to your local console).
@@ -62,10 +64,10 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--worktree` - Review local uncommitted changes (staged + unstaged).
 - `--last-commit` - Review the last commit (`HEAD`).
 - `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated only).
-- `--max-old-files=30` - Max number of pre-change files included in the prompt.
-- `--max-old-file-chars=12000` - Max chars per pre-change file content.
 - `--max-diffs=50` - Max number of diffs included in the prompt.
 - `--max-diff-chars=16000` - Max chars per diff chunk.
 - `--max-total-prompt-chars=220000` - Final hard cap for prompt size.
 - `--debug` - Print full error details (stack and API error fields).
 - `--help` - Show help output.
+
+In CI MR mode, the reviewer now fetches additional file context on-demand via tool calls instead of eagerly loading all pre-edit files up front. This reduces large-payload timeouts on big diffs.
