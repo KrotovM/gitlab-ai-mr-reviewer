@@ -82,6 +82,55 @@ export const fetchPreEditFiles: GitLabFetchFunction<
   }, []);
 };
 
+interface FetchFileAtRefParams {
+  filePath: string;
+  ref: string;
+}
+type FetchFileAtRefResult = string | GitLabError;
+export const fetchFileAtRef: GitLabFetchFunction<
+  FetchFileAtRefParams,
+  FetchFileAtRefResult
+> = async ({ gitLabBaseUrl, headers, filePath, ref }) => {
+  const url = new URL(
+    `${gitLabBaseUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
+  );
+  url.searchParams.set("ref", ref);
+  let res: Response | Error;
+  try {
+    res = await fetch(url, { headers: { ...headers } });
+  } catch (error: any) {
+    res = error;
+  }
+  if (res instanceof Error || !res.ok) {
+    const responseDetails = await (async () => {
+      if (res instanceof Error) {
+        return {
+          url: url.toString(),
+          error: {
+            name: res.name,
+            message: res.message,
+            stack: res.stack,
+          },
+        };
+      }
+      const bodyText = await res.text().catch(() => "");
+      return {
+        url: url.toString(),
+        status: res.status,
+        statusText: res.statusText,
+        body: bodyText.slice(0, 1000),
+      };
+    })();
+    return new GitLabError({
+      name: "MISSING_OLD_FILES",
+      message: `Failed to fetch file "${filePath}" at ref "${ref}"`,
+      statusCode: res instanceof Error ? 502 : res.status,
+      cause: responseDetails,
+    });
+  }
+  return await res.text();
+};
+
 export async function generateAICompletion(
   messages: ChatCompletionMessageParam[],
   openaiInstance: OpenAI,

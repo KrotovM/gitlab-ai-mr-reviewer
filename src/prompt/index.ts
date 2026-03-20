@@ -1,17 +1,12 @@
 import type { ChatCompletionMessageParam, ChatCompletion } from 'openai/resources/index.mjs'
-import type { OldFileVersion } from '../gitlab/services.js'
 
 export interface PromptLimits {
-  maxOldFiles: number
-  maxOldFileChars: number
   maxDiffs: number
   maxDiffChars: number
   maxTotalPromptChars: number
 }
 
 export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
-  maxOldFiles: 30,
-  maxOldFileChars: 12000,
   maxDiffs: 50,
   maxDiffChars: 16000,
   maxTotalPromptChars: 220000
@@ -33,63 +28,40 @@ const QUESTIONS = `\n\nQuestions:\n
 
 const MESSAGES: ChatCompletionMessageParam[] = [{
   role: 'system',
-  content: 'You are a senior developer reviewing code changes. Format the response so it renders nicely in GitLab, with organized markdown (use code blocks if needed), and send only the review content. Include short question labels so each answer section is easy to identify.'
+  content: 'You are a senior developer reviewing code changes. Format the response so it renders nicely in GitLab, with organized markdown (use code blocks if needed), and send only the review content. Include short question labels so each answer section is easy to identify. If tool calls are available, request additional file context only when necessary and keep requests targeted.'
 }]
 
 export const AI_MODEL_TEMPERATURE = 0.2
 
 export interface BuildPromptParameters {
-  oldFiles?: OldFileVersion[]
   changes: Array<{ diff: string }>
   limits?: Partial<PromptLimits>
 
 }
 
-function trimToBudget (value: string, budget: number, markerLabel: string): string {
-  if (budget <= 0) return ''
-  return truncateWithMarker(value, budget, markerLabel)
-}
-export const buildPrompt = ({ changes, oldFiles, limits }: BuildPromptParameters): ChatCompletionMessageParam[] => {
+export const buildPrompt = ({ changes, limits }: BuildPromptParameters): ChatCompletionMessageParam[] => {
   const effectiveLimits: PromptLimits = {
     ...DEFAULT_PROMPT_LIMITS,
     ...(limits ?? {})
   }
-  const oldFilesTrimmed = (oldFiles ?? [])
-    .slice(0, effectiveLimits.maxOldFiles)
-    .map((oldFile) => ({
-      fileName: oldFile.fileName,
-      fileContent: truncateWithMarker(oldFile.fileContent, effectiveLimits.maxOldFileChars, `old file "${oldFile.fileName}"`)
-    }))
   const diffsTrimmed = changes
     .slice(0, effectiveLimits.maxDiffs)
     .map((change, index) => truncateWithMarker(change.diff, effectiveLimits.maxDiffChars, `diff #${index + 1}`))
 
-  const hasOldFiles = oldFilesTrimmed.length > 0
-  const oldFilesText = hasOldFiles ? oldFilesTrimmed.map(oldFile => JSON.stringify(oldFile)).join('\n\n') : '(not provided)'
   const changesText = diffsTrimmed.join('\n\n')
 
   const intro = `
 As a senior developer, review the following code changes and answer code review questions about them. The code changes are provided as git diff strings.
-${hasOldFiles ? 'The entire file before the change is provided for context. Make sure to keep it as a reference when reviewing the changes.' : 'No full pre-change file context is available; review based on the diff only.'}
+No full pre-change file context is embedded in this prompt; review based on the diff and request additional context through tools when needed.
 Input safety constraints were applied to keep payload size bounded. If you see truncation markers, call out potential blind spots in your review.
 `
   const changesSection = `
 Changes:
 ${changesText || '(not provided)'}
 `
-  const oldFilesSection = `
-Files before changes:
-${oldFilesText}
-`
   const questionsSection = QUESTIONS
 
-  // Keep diffs first in prompt priority. Old file snapshots are added only with remaining budget.
-  const requiredPrefix = `${intro}\n${changesSection}\n`
-  const requiredSuffix = `\n${questionsSection}`
-  const reservedForRequired = requiredPrefix.length + requiredSuffix.length
-  const oldFilesBudget = Math.max(0, effectiveLimits.maxTotalPromptChars - reservedForRequired)
-  const boundedOldFilesSection = trimToBudget(oldFilesSection, oldFilesBudget, 'old files context')
-  const fullPrompt = `${requiredPrefix}${boundedOldFilesSection}${requiredSuffix}`
+  const fullPrompt = `${intro}\n${changesSection}\n${questionsSection}`
   const boundedContent = truncateWithMarker(fullPrompt, effectiveLimits.maxTotalPromptChars, 'prompt payload')
   return [...MESSAGES, { role: 'user', content: boundedContent }]
 }
