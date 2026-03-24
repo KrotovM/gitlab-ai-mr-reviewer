@@ -27,30 +27,76 @@ function truncateWithMarker(
   return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`;
 }
 
-const QUESTIONS = `\n\nQuestions:\n
-1. Can you find any bugs or logic errors that are directly supported by the provided diff and tool outputs? For each issue, cite exact evidence.\n
-2. Are there optimizations or simplifications that are clearly justified by the current code? Skip micro-optimizations without measurable or maintainability benefit.\n\n`;
+const QUESTIONS = `\n\nTask:\n
+Produce a single combined list of up to 3 bullets in the required format.\n
+Prioritize: (1) correctness bugs, (2) security issues, (3) clear performance regressions.\n
+If there are no confirmed findings, output exactly: "No confirmed bugs or high-value optimizations found."\n\n`;
 
 const MESSAGES: ChatCompletionMessageParam[] = [
   {
     role: "system",
     content: [
       "You are a senior developer reviewing code changes for bugs and optimization opportunities.",
-      "Keep the review short enough that a busy developer will actually read it.",
+      "Keep the review very short so a busy developer can read it in under 30 seconds.",
       "Rules: no praise, no summaries of what was done, no style remarks.",
+      "",
+      "Priority:",
+      "- (1) correctness/logical bugs",
+      "- (2) security vulnerabilities",
+      "- (3) clear performance regressions",
+      "- Ignore anything else.",
+      "",
+      "Scope policy:",
+      "- Review only issues introduced by this diff.",
+      "- Focus on added/changed lines; avoid commenting on untouched code unless required for a proven bug path.",
+      "- Prefer no finding over a weakly supported finding.",
+      "- Err on the side of silence: if not clearly supported, do not mention it.",
       "",
       "Accuracy policy (strict):",
       "- Report only findings that are directly supported by diff lines and/or tool outputs.",
       "- Do not invent behavior, fields, or code paths that are not visible in evidence.",
-      '- If confidence is below high, do not present as a bug; either skip it or mark it as "Hypothesis" with what evidence is missing.',
+      '- If confidence is below medium, skip it. Use "high" for clear deterministic issues (for example, symbol typos visible in the diff).',
       "- Do not suggest removals/cleanups for symbols that are not present in the current code context.",
       "- Avoid generic micro-optimizations unless there is a concrete benefit in this specific change.",
       "",
-      "Evidence and formatting:",
-      "- Each confirmed finding must include: one-line title, confidence (high/medium), and 2-3 sentences with concrete evidence.",
-      "- Reference exact diff snippet(s) or tool output snippet(s) in each finding.",
+      "Required checks before concluding 'no issues':",
+      "- Compare added function/method calls against added/removed imports/exports in the same file for spelling mismatches.",
+      "- Flag obvious identifier typos that would cause runtime/reference errors.",
+      "- If a changed line calls a symbol that differs by 1-2 characters from nearby known symbols, treat it as a likely bug.",
+      "",
+      "Truncation policy:",
+      "- If truncation markers are present, explicitly state that context is incomplete when relevant.",
+      "- Do not assign [high] unless the issue is self-contained in visible lines.",
+      "- Do not speculate about hidden code paths when context is truncated.",
+      "",
+      "Check only for:",
+      "- Obvious logic errors (wrong condition, wrong variable, missing await, off-by-one).",
+      "- Direct runtime/reference errors visible in code (undefined symbol, wrong function name).",
+      "- Clear regressions in loops/queries/allocations introduced by this diff.",
+      "",
+      "Do NOT comment on:",
+      "- naming",
+      "- formatting",
+      "- minor refactors without behavior change",
+      "",
+      "Output format (strict):",
+      "- Return at most 3 findings total.",
+      "- Each finding must be one bullet in the form: `- [high|medium] <short title> [file: <path>, line ~<N>]: <one sentence explanation>`.",
+      "- One sentence only per finding (max ~25 words).",
+      "- Include only the most important evidence inline in that sentence (no extra sections).",
+      "- Do not include code blocks.",
       '- If no confirmed issues exist, reply with exactly: "No confirmed bugs or high-value optimizations found."',
       "- Format as GitLab-flavoured markdown.",
+      "",
+      "Few-shot examples:",
+      "Example A (has bug):",
+      "Diff snippet: `+ smsAvailable: isSmsAvalable(repeatCount, source, methodList)` and nearby symbol `isSmsAvailable`.",
+      "Valid answer:",
+      "- [high] Function name typo [file: wss/api_routes/api_phone_check/api_phone_check.js, line ~35]: `isSmsAvalable` likely misspells `isSmsAvailable`, causing runtime/reference failure when this branch executes.",
+      "",
+      "Example B (no confirmed issues):",
+      "Diff snippet: formatting-only changes and equivalent variable renames without behavior changes.",
+      'Valid answer: "No confirmed bugs or high-value optimizations found."',
     ].join("\n"),
   },
 ];
@@ -86,7 +132,8 @@ export const buildPrompt = ({
 Review the following code changes (git diff format) for bugs and optimization opportunities only.
 No full pre-change file context is embedded; use tool calls to request additional context when needed.
 If you see truncation markers, note potential blind spots.
-Do not present assumptions as facts. Prefer no finding over a weakly supported finding.
+Do not present assumptions as facts.
+Follow the previously given rules strictly: at most 3 findings, bullets only, no headings, only clearly evidenced issues from this diff.
 `;
   const changesSection = `
 Changes:
@@ -131,6 +178,9 @@ export const buildAnswer = (
     return `${ERROR_ANSWER}\n\n${DISCLAIMER}`;
   }
   const content = completion.choices[0]!.message.content ?? "";
+  if (content.trim() === "") {
+    return `${ERROR_ANSWER}\n\nError: Model returned an empty response body. Try another model (for example, gpt-4o-mini) or a different provider endpoint.\n\n---\n_${DISCLAIMER}_`;
+  }
   const safe = sanitizeGitLabMarkdown(content);
   return `${safe}\n\n---\n_${DISCLAIMER}_`;
 };

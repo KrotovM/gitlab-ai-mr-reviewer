@@ -40,6 +40,12 @@ OPENAI_API_KEY=... npx -y @krotovm/gitlab-ai-review --worktree
 
 # review last commit and ignore docs/lock changes by extension
 OPENAI_API_KEY=... npx -y @krotovm/gitlab-ai-review --last-commit --ignore-ext=md,lock
+
+# review a prepared git diff from file
+OPENAI_API_KEY=... npx -y @krotovm/gitlab-ai-review --diff-file=./changes.diff
+
+# use a custom OpenAI-compatible endpoint
+OPENAI_API_KEY=... OPENAI_BASE_URL="https://api.openai.com/v1" npx -y @krotovm/gitlab-ai-review --worktree
 ```
 
 ## Env variables
@@ -50,6 +56,8 @@ Set these in your project/group CI settings (or locally in your shell):
 - `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
 - `PROJECT_ACCESS_TOKEN` (optional but recommended for private projects; token with `api` scope)
+
+`OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
 
 GitLab provides these automatically in Merge Request pipelines:
 
@@ -63,6 +71,7 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--ci` - Run in GitLab MR pipeline mode and post a new MR note.
 - `--worktree` - Review local uncommitted changes (staged + unstaged).
 - `--last-commit` - Review the last commit (`HEAD`).
+- `--diff-file=./changes.diff` - Review git-diff content from a file and print to stdout.
 - `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated only).
 - `--max-diffs=50` - Max number of diffs included in the prompt.
 - `--max-diff-chars=16000` - Max chars per diff chunk.
