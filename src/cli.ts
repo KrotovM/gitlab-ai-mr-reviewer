@@ -520,6 +520,7 @@ async function reviewMergeRequestWithTools(params: {
   const messages: ChatCompletionMessageParam[] = buildPrompt({
     changes: changes.map((change) => ({ diff: change.diff })),
     limits: promptLimits,
+    allowTools: true,
   });
   messages.push({
     role: "user",
