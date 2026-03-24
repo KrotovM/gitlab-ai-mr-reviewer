@@ -19,16 +19,12 @@ function truncateWithMarker (value: string, maxChars: number, markerLabel: strin
 }
 
 const QUESTIONS = `\n\nQuestions:\n
-1. Can you summarize the changes in a succinct bullet point list\n
-2. In the diff, are the added or changed code written in a clear and easy to understand way?\n
-3. Does the code use comments, or descriptive function and variables names that explain what they mean?\n
-4. based on the code complexity of the changes, could the code be simplified without breaking its functionality? if so can you give example snippets?\n
-5. Can you find any bugs, if so please explain and reference line numbers?\n
-6. Do you see any code that could induce security issues?\n\n`
+1. Can you find any bugs or logic errors? Explain each one and reference the relevant diff lines.\n
+2. Are there optimizations or simplifications that would improve performance or reduce complexity without breaking functionality? Provide example snippets where applicable.\n\n`
 
 const MESSAGES: ChatCompletionMessageParam[] = [{
   role: 'system',
-  content: 'You are a senior developer reviewing code changes. Format the response so it renders nicely in GitLab, with organized markdown (use code blocks if needed), and send only the review content. Include short question labels so each answer section is easy to identify. If tool calls are available, request additional file context only when necessary and keep requests targeted.'
+  content: 'You are a senior developer reviewing code changes for bugs and optimization opportunities. Keep the review short enough that a busy developer will actually read it. Rules: no praise, no summaries of what was done, no style remarks. Each finding: one-line title, 2-3 sentence explanation, optional short code snippet. Skip preambles and conclusions. If you find no issues, reply with a single sentence. Format as GitLab-flavoured markdown.'
 }]
 
 export const AI_MODEL_TEMPERATURE = 0.2
@@ -51,9 +47,9 @@ export const buildPrompt = ({ changes, limits }: BuildPromptParameters): ChatCom
   const changesText = diffsTrimmed.join('\n\n')
 
   const intro = `
-As a senior developer, review the following code changes and answer code review questions about them. The code changes are provided as git diff strings.
-No full pre-change file context is embedded in this prompt; review based on the diff and request additional context through tools when needed.
-Input safety constraints were applied to keep payload size bounded. If you see truncation markers, call out potential blind spots in your review.
+Review the following code changes (git diff format) for bugs and optimization opportunities only.
+No full pre-change file context is embedded; use tool calls to request additional context when needed.
+If you see truncation markers, note potential blind spots.
 `
   const changesSection = `
 Changes:

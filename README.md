@@ -7,7 +7,7 @@ Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automaticall
 ## Features
 
 - Automatically reviews code changes in GitLab repositories
-- Provides feedback on code clarity, simplicity, bugs, and security issues
+- Provides feedback on bugs and optimization opportunities
 - Generates Markdown-formatted responses for easy readability in GitLab
 
 ## Usage

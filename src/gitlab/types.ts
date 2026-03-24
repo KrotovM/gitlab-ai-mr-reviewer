@@ -11,6 +11,7 @@ type GitLabErrorName =
   | 'EMPTY_DIFF'
   | 'MISSING_OLD_FILES'
   | 'FAILED_TO_POST_COMMENT'
+  | 'SEARCH_FAILED'
 
 type OpenAIErrorName =
   | 'MISSING_AI_COMPLETION'
