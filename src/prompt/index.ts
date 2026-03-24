@@ -177,8 +177,35 @@ export const buildAnswer = (
   if (completion == null || completion.choices.length === 0) {
     return `${ERROR_ANSWER}\n\n${DISCLAIMER}`;
   }
-  const content = completion.choices[0]!.message.content ?? "";
-  if (content.trim() === "") {
+  const firstChoice = completion.choices[0] as any;
+  const message = firstChoice?.message as any;
+
+  const contentFromMessage = (() => {
+    const raw = message?.content;
+    if (typeof raw === "string") return raw;
+    // Some OpenAI-compatible providers return multipart message content.
+    if (Array.isArray(raw)) {
+      const joined = raw
+        .map((part) => {
+          if (typeof part === "string") return part;
+          if (part != null && typeof part.text === "string") return part.text;
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+      return joined;
+    }
+    return "";
+  })();
+
+  // Compatibility fallback fields used by some providers.
+  const fallbackText =
+    (typeof message?.refusal === "string" ? message.refusal : "") ||
+    (typeof firstChoice?.text === "string" ? firstChoice.text : "") ||
+    "";
+
+  const content = (contentFromMessage || fallbackText).trim();
+  if (content === "") {
     return `${ERROR_ANSWER}\n\nError: Model returned an empty response body. Try another model (for example, gpt-4o-mini) or a different provider endpoint.\n\n---\n_${DISCLAIMER}_`;
   }
   const safe = sanitizeGitLabMarkdown(content);
