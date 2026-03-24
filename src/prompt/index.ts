@@ -1,89 +1,136 @@
-import type { ChatCompletionMessageParam, ChatCompletion } from 'openai/resources/index.mjs'
+/** @format */
+
+import type {
+  ChatCompletionMessageParam,
+  ChatCompletion,
+} from "openai/resources/index.mjs";
 
 export interface PromptLimits {
-  maxDiffs: number
-  maxDiffChars: number
-  maxTotalPromptChars: number
+  maxDiffs: number;
+  maxDiffChars: number;
+  maxTotalPromptChars: number;
 }
 
 export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
   maxDiffs: 50,
   maxDiffChars: 16000,
-  maxTotalPromptChars: 220000
-}
+  maxTotalPromptChars: 220000,
+};
 
-function truncateWithMarker (value: string, maxChars: number, markerLabel: string): string {
-  if (value.length <= maxChars) return value
-  const omitted = value.length - maxChars
-  return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`
+function truncateWithMarker(
+  value: string,
+  maxChars: number,
+  markerLabel: string,
+): string {
+  if (value.length <= maxChars) return value;
+  const omitted = value.length - maxChars;
+  return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`;
 }
 
 const QUESTIONS = `\n\nQuestions:\n
-1. Can you find any bugs or logic errors? Explain each one and reference the relevant diff lines.\n
-2. Are there optimizations or simplifications that would improve performance or reduce complexity without breaking functionality? Provide example snippets where applicable.\n\n`
+1. Can you find any bugs or logic errors that are directly supported by the provided diff and tool outputs? For each issue, cite exact evidence.\n
+2. Are there optimizations or simplifications that are clearly justified by the current code? Skip micro-optimizations without measurable or maintainability benefit.\n\n`;
 
-const MESSAGES: ChatCompletionMessageParam[] = [{
-  role: 'system',
-  content: 'You are a senior developer reviewing code changes for bugs and optimization opportunities. Keep the review short enough that a busy developer will actually read it. Rules: no praise, no summaries of what was done, no style remarks. Each finding: one-line title, 2-3 sentence explanation, optional short code snippet. Skip preambles and conclusions. If you find no issues, reply with a single sentence. Format as GitLab-flavoured markdown.'
-}]
+const MESSAGES: ChatCompletionMessageParam[] = [
+  {
+    role: "system",
+    content: [
+      "You are a senior developer reviewing code changes for bugs and optimization opportunities.",
+      "Keep the review short enough that a busy developer will actually read it.",
+      "Rules: no praise, no summaries of what was done, no style remarks.",
+      "",
+      "Accuracy policy (strict):",
+      "- Report only findings that are directly supported by diff lines and/or tool outputs.",
+      "- Do not invent behavior, fields, or code paths that are not visible in evidence.",
+      '- If confidence is below high, do not present as a bug; either skip it or mark it as "Hypothesis" with what evidence is missing.',
+      "- Do not suggest removals/cleanups for symbols that are not present in the current code context.",
+      "- Avoid generic micro-optimizations unless there is a concrete benefit in this specific change.",
+      "",
+      "Evidence and formatting:",
+      "- Each confirmed finding must include: one-line title, confidence (high/medium), and 2-3 sentences with concrete evidence.",
+      "- Reference exact diff snippet(s) or tool output snippet(s) in each finding.",
+      '- If no confirmed issues exist, reply with exactly: "No confirmed bugs or high-value optimizations found."',
+      "- Format as GitLab-flavoured markdown.",
+    ].join("\n"),
+  },
+];
 
-export const AI_MODEL_TEMPERATURE = 0.2
+export const AI_MODEL_TEMPERATURE = 0.2;
 
 export interface BuildPromptParameters {
-  changes: Array<{ diff: string }>
-  limits?: Partial<PromptLimits>
-
+  changes: Array<{ diff: string }>;
+  limits?: Partial<PromptLimits>;
 }
 
-export const buildPrompt = ({ changes, limits }: BuildPromptParameters): ChatCompletionMessageParam[] => {
+export const buildPrompt = ({
+  changes,
+  limits,
+}: BuildPromptParameters): ChatCompletionMessageParam[] => {
   const effectiveLimits: PromptLimits = {
     ...DEFAULT_PROMPT_LIMITS,
-    ...(limits ?? {})
-  }
+    ...(limits ?? {}),
+  };
   const diffsTrimmed = changes
     .slice(0, effectiveLimits.maxDiffs)
-    .map((change, index) => truncateWithMarker(change.diff, effectiveLimits.maxDiffChars, `diff #${index + 1}`))
+    .map((change, index) =>
+      truncateWithMarker(
+        change.diff,
+        effectiveLimits.maxDiffChars,
+        `diff #${index + 1}`,
+      ),
+    );
 
-  const changesText = diffsTrimmed.join('\n\n')
+  const changesText = diffsTrimmed.join("\n\n");
 
   const intro = `
 Review the following code changes (git diff format) for bugs and optimization opportunities only.
 No full pre-change file context is embedded; use tool calls to request additional context when needed.
 If you see truncation markers, note potential blind spots.
-`
+Do not present assumptions as facts. Prefer no finding over a weakly supported finding.
+`;
   const changesSection = `
 Changes:
-${changesText || '(not provided)'}
-`
-  const questionsSection = QUESTIONS
+${changesText || "(not provided)"}
+`;
+  const questionsSection = QUESTIONS;
 
-  const fullPrompt = `${intro}\n${changesSection}\n${questionsSection}`
-  const boundedContent = truncateWithMarker(fullPrompt, effectiveLimits.maxTotalPromptChars, 'prompt payload')
-  return [...MESSAGES, { role: 'user', content: boundedContent }]
-}
+  const fullPrompt = `${intro}\n${changesSection}\n${questionsSection}`;
+  const boundedContent = truncateWithMarker(
+    fullPrompt,
+    effectiveLimits.maxTotalPromptChars,
+    "prompt payload",
+  );
+  return [...MESSAGES, { role: "user", content: boundedContent }];
+};
 
-const ERROR_ANSWER = 'I\'m sorry, I\'m not feeling well today. Please ask a human to review this code change.'
+const ERROR_ANSWER =
+  "I'm sorry, I'm not feeling well today. Please ask a human to review this code change.";
 
-const DISCLAIMER = 'This comment was generated by an artificial intelligence duck.'
+const DISCLAIMER =
+  "This comment was generated by an artificial intelligence duck.";
 
-function sanitizeGitLabMarkdown (input: string): string {
-  const normalized = input.replace(/\r\n/g, '\n').trim()
+function sanitizeGitLabMarkdown(input: string): string {
+  const normalized = input.replace(/\r\n/g, "\n").trim();
   // If the model forgets to close a fenced code block, GitLab will render the rest (incl. disclaimer) inside it.
-  const fenceCount = (normalized.match(/```/g) ?? []).length
-  const withClosedFence = fenceCount % 2 === 1 ? `${normalized}\n\`\`\`` : normalized
-  return withClosedFence
+  const fenceCount = (normalized.match(/```/g) ?? []).length;
+  const withClosedFence =
+    fenceCount % 2 === 1 ? `${normalized}\n\`\`\`` : normalized;
+  return withClosedFence;
 }
 
-export const buildAnswer = (completion: ChatCompletion | Error | undefined): string => {
+export const buildAnswer = (
+  completion: ChatCompletion | Error | undefined,
+): string => {
   if (completion instanceof Error) {
-    const maybeCause = (completion as any).cause
-    const causeMessage = maybeCause instanceof Error ? maybeCause.message : undefined
-    return `${ERROR_ANSWER}\n\nError: ${completion.message}${causeMessage != null ? `\nCause: ${causeMessage}` : ''}`
+    const maybeCause = (completion as any).cause;
+    const causeMessage =
+      maybeCause instanceof Error ? maybeCause.message : undefined;
+    return `${ERROR_ANSWER}\n\nError: ${completion.message}${causeMessage != null ? `\nCause: ${causeMessage}` : ""}`;
   }
-  if ((completion == null) || (completion.choices.length === 0)) {
-    return `${ERROR_ANSWER}\n\n${DISCLAIMER}`
+  if (completion == null || completion.choices.length === 0) {
+    return `${ERROR_ANSWER}\n\n${DISCLAIMER}`;
   }
-  const content = completion.choices[0]!.message.content ?? ''
-  const safe = sanitizeGitLabMarkdown(content)
-  return `${safe}\n\n---\n_${DISCLAIMER}_`
-}
+  const content = completion.choices[0]!.message.content ?? "";
+  const safe = sanitizeGitLabMarkdown(content);
+  return `${safe}\n\n---\n_${DISCLAIMER}_`;
+};
