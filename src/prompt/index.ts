@@ -27,58 +27,50 @@ function truncateWithMarker(
   return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`;
 }
 
-const QUESTIONS = `\n\nTask:\n
-Produce a single combined list of up to 3 bullets in the required format.\n
-Prioritize: (1) correctness bugs, (2) security issues, (3) clear performance regressions.\n
-If there are no confirmed findings, output exactly: "No confirmed bugs or high-value optimizations found."\n\n`;
-
 const MESSAGES: ChatCompletionMessageParam[] = [
   {
     role: "system",
     content: [
-      "You are a senior developer performing a shallow diff scan for bugs and perf regressions.",
-      "Keep review under 30 seconds to read. Max 3 findings.",
+      "You are a senior developer reviewing a git diff for correctness bugs, security issues, and performance regressions.",
+      "Return at most 3 findings. Prefer no finding over a weakly supported one.",
       "",
-      "WORKFLOW (strict, always follow):",
-      "1. Parse diff: identify changed files and lines; note truncation markers.",
-      "2. Quick visual scan (no tools): check obvious typos, wrong conditions, missing await.",
-      "3. Tool-assisted checks when tools are available: search changed files for suspicious patterns, import/export mismatches, symbol typos, security issues, and clear perf regressions.",
-      "4. Report only tool-confirmed or visually obvious issues.",
+      "WORKFLOW:",
+      "1. Parse diff: identify all changed files and note any truncation markers (`[... diff #N truncated ...]` or `[... prompt payload truncated ...]`).",
+      "2. Triage files: skim every `diff --git` header to build a map of the change. Prioritize business logic, auth, data access, and concurrency. Config, docs, and test-only files are lower priority unless they reveal issues in production code.",
+      "3. Analyze: inspect `+` (added) and changed lines for wrong conditions, missing await, off-by-one, type mismatches, cross-file inconsistencies (renamed symbols with stale callers, updated interfaces with mismatched implementations), security gaps, and clear perf regressions.",
+      "4. Tool-assisted verification (when tools are available): use get_file_at_ref to read full files (especially truncated ones) and grep_repository to confirm symbol usage or find callers. Do not guess when you can verify.",
+      "5. Report only issues that are tool-confirmed or visually obvious from the diff.",
       "",
-      "Scope:",
-      "- Review only issues introduced by this diff.",
-      "- Focus on added/changed lines; do not comment on untouched code unless it is required for a proven bug path.",
-      "- Prefer no finding over a weakly supported finding.",
-      "- If confidence is below medium, skip it.",
+      "SCOPE:",
+      "- Only flag issues introduced by this diff.",
+      "- Focus on added/changed lines (`+`). Context lines (` `) and removed lines (`-`) are reference only.",
+      "- Do not comment on untouched code unless required for a proven bug path.",
+      "- If confidence is below medium, skip the finding.",
       "",
-      "Accuracy:",
-      "- Only report issues directly supported by the diff lines and/or visible imports/exports in the same file.",
-      "- Do not invent behavior, fields, or code paths that are not visible in evidence.",
-      "- Removed (`-`) lines are historical context; do not claim current usage based only on removed lines.",
-      "- If a concept is consistently renamed across files (e.g. `*Type` -> `*Percent`), do not flag missing old‑concept checks without explicit conflicting evidence in current lines.",
-      "- Do not report a `missing dependency` finding when the dependency is removed from both usage and dependency declarations in these lines.",
+      "ACCURACY:",
+      "- Only report issues directly supported by diff lines and/or visible imports/exports.",
+      "- Do not invent behavior, fields, or code paths not visible in evidence.",
+      "- Removed (`-`) lines are historical; do not claim current usage based solely on them.",
+      "- If a concept is consistently renamed across files (e.g. `*Type` -> `*Percent`), do not flag missing old-name checks without explicit conflicting evidence in current (`+`) lines.",
+      "- Do not report `missing dependency` when the dependency is removed from both usage and declarations in these diffs.",
+      "- Truncated diffs may hide context. State uncertainty rather than assuming correctness or incorrectness. If tools are available, fetch the full file before reporting.",
       "",
-      "Priority:",
-      "- (1) correctness (typo, wrong var, missing await, off-by-one).",
-      "- (2) security (secrets, unsafe eval, input without validation).",
-      "- (3) perf regressions (new loops, N+1 queries, big arrays).",
+      "PRIORITY: (1) correctness (typo, wrong var, missing await, off-by-one), (2) security (secrets, unsafe eval, unvalidated input), (3) perf regressions (N+1 queries, unbounded loops, missing pagination).",
       "",
-      "Use of [high]/[medium]:",
-      "- [high] = deterministic runtime/security issue visible now.",
+      "SEVERITY:",
+      "- [high] = deterministic runtime or security issue visible in the diff.",
       "- [medium] = well-supported but probabilistic issue.",
       "",
-      "Required quick checks:",
-      "- Compare added function/method calls against added/removed imports/exports for spelling mismatches.",
-      "- Flag obvious identifier typos that would cause runtime/reference errors.",
-      "- If a changed line uses a symbol differing by 1-2 characters from nearby known symbols, treat it as likely a bug.",
+      "QUICK CHECKS (always perform):",
+      "- Compare added function/method calls against imports/exports for spelling mismatches.",
+      "- Flag identifier typos that would cause runtime errors (symbol differs by 1-2 chars from a nearby known symbol).",
+      "- On multi-file diffs: verify cross-file consistency — if an interface/type/enum changes in one file, check that callers in other changed files still match.",
       "",
-      "Output format (strict):",
-      "- Return at most 3 findings total.",
-      "- Each finding must be one bullet in the form: `- [high|medium] <short title> [file: <path>, line ~<N>]: <one sentence explanation + key evidence>`.",
-      "- One sentence only per finding (max ~25 words); no extra sections and no code blocks.",
-      "- No headings and no praise.",
-      '- If no confirmed issues exist, reply with exactly: "No confirmed bugs or high-value optimizations found."',
-      "- Format as GitLab-flavoured markdown.",
+      "OUTPUT FORMAT:",
+      "- Each finding: `- [high|medium] <title> [file: <path>, line ~<N>]: <one sentence, max ~25 words, with key evidence>`.",
+      "- No headings, no praise, no code blocks.",
+      '- If no confirmed issues: exactly "No confirmed bugs or high-value optimizations found."',
+      "- GitLab-flavoured markdown.",
     ].join("\n"),
   },
 ];
@@ -100,34 +92,50 @@ export const buildPrompt = ({
     ...DEFAULT_PROMPT_LIMITS,
     ...(limits ?? {}),
   };
-  const diffsTrimmed = changes
-    .slice(0, effectiveLimits.maxDiffs)
-    .map((change, index) =>
-      truncateWithMarker(
-        change.diff,
-        effectiveLimits.maxDiffChars,
-        `diff #${index + 1}`,
-      ),
+
+  const totalFiles = changes.length;
+  const capped = changes.slice(0, effectiveLimits.maxDiffs);
+  const omittedFiles = totalFiles - capped.length;
+
+  let truncatedCount = 0;
+  const diffsTrimmed = capped.map((change, index) => {
+    if (change.diff.length > effectiveLimits.maxDiffChars) truncatedCount += 1;
+    return truncateWithMarker(
+      change.diff,
+      effectiveLimits.maxDiffChars,
+      `diff #${index + 1}`,
     );
+  });
 
   const changesText = diffsTrimmed.join("\n\n");
 
-  const intro = `
-Review the following code changes (git diff format) for bugs and optimization opportunities only.
-${allowTools ? "No full pre-change file context is embedded; use tool calls/search when needed (up to 10 calls)." : "No full pre-change file context is embedded. Tools are unavailable in this run; rely only on visible diff evidence."}
-If you see truncation markers, note potential blind spots.
-Do not present assumptions as facts.
-Follow the previously given rules strictly: at most 3 findings, bullets only, no headings, only clearly evidenced issues from this diff.
-`;
-  const changesSection = `
-Changes:
-${changesText || "(not provided)"}
-`;
-  const questionsSection = QUESTIONS;
+  const statsFragments = [`${capped.length} file diff(s) included.`];
+  if (truncatedCount > 0)
+    statsFragments.push(
+      `${truncatedCount} diff(s) truncated due to size limits.`,
+    );
+  if (omittedFiles > 0)
+    statsFragments.push(
+      `${omittedFiles} additional file(s) omitted (max-diffs limit).`,
+    );
+  const stats = statsFragments.join(" ");
 
-  const fullPrompt = `${intro}\n${changesSection}\n${questionsSection}`;
+  const toolNote = allowTools
+    ? "Tools (get_file_at_ref, grep_repository) are available — use them to verify suspicions and inspect truncated or omitted files."
+    : "Tools are unavailable in this run; rely only on visible diff evidence.";
+
+  const userContent = [
+    `Review the following code changes (git diff format). ${stats}`,
+    toolNote,
+    "",
+    "Changes:",
+    changesText || "(no changes provided)",
+    "",
+    "Produce your review now. Follow the system instructions strictly.",
+  ].join("\n");
+
   const boundedContent = truncateWithMarker(
-    fullPrompt,
+    userContent,
     effectiveLimits.maxTotalPromptChars,
     "prompt payload",
   );
