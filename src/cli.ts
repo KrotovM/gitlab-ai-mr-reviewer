@@ -249,6 +249,20 @@ function logStep(message: string): void {
   process.stdout.write(`${message}\n`);
 }
 
+async function getCliVersion(): Promise<string> {
+  try {
+    const packageJsonUrl = new URL("../package.json", import.meta.url);
+    const packageJsonText = await readFile(packageJsonUrl, "utf8");
+    const parsed = JSON.parse(packageJsonText) as { version?: string };
+    if (parsed.version != null && parsed.version.trim() !== "") {
+      return parsed.version.trim();
+    }
+  } catch {
+    // Best-effort logging only.
+  }
+  return "unknown";
+}
+
 async function runGit(args: string[]): Promise<string> {
   const { spawn } = await import("node:child_process");
   return await new Promise((resolve, reject) => {
@@ -698,6 +712,9 @@ async function reviewMergeRequestWithTools(params: {
 }
 
 async function main(): Promise<void> {
+  const cliVersion = await getCliVersion();
+  logStep(`gitlab-ai-review v${cliVersion}`);
+
   const diffFilePath = parseDiffFileFlag(process.argv);
   if (diffFilePath != null && hasModeFlag(process.argv)) {
     throw new Error(
