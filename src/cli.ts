@@ -16,6 +16,7 @@ import {
   generateAICompletion,
   type MergeRequestChange,
   postMergeRequestNote,
+  searchRepository,
 } from "./gitlab/services.js";
 
 function printHelp(): void {
@@ -300,6 +301,7 @@ async function reviewDiffToConsole(
 }
 
 const TOOL_NAME_GET_FILE = "get_file_at_ref";
+const TOOL_NAME_GREP = "grep_repository";
 const MAX_TOOL_ROUNDS = 12;
 
 function buildReviewMetadata(
@@ -319,9 +321,10 @@ function buildReviewMetadata(
       refs,
       changed_files: files,
       tool_usage_guidance: [
-        "If diff context is insufficient, call get_file_at_ref.",
+        "If diff context is insufficient, call get_file_at_ref to read a specific file.",
+        "Use grep_repository to search for usages, definitions, or patterns across the codebase.",
         "Use refs.base to inspect pre-change content and refs.head for current content.",
-        "Prefer targeted file fetches instead of broad context requests.",
+        "Prefer targeted searches and file fetches; avoid broad context requests.",
       ],
     },
     null,
@@ -336,6 +339,7 @@ async function reviewMergeRequestWithTools(params: {
   changes: MergeRequestChange[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
+  projectId: string;
   headers: Record<string, string>;
 }): Promise<string> {
   const {
@@ -345,6 +349,7 @@ async function reviewMergeRequestWithTools(params: {
     changes,
     refs,
     gitLabProjectApiUrl,
+    projectId,
     headers,
   } = params;
 
@@ -381,6 +386,29 @@ async function reviewMergeRequestWithTools(params: {
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GREP,
+        description:
+          "Search the repository for a keyword or pattern. Returns up to 10 matching code fragments with file paths and line numbers.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: {
+              type: "string",
+              description: "Search string (keyword, function name, variable, etc.).",
+            },
+            ref: {
+              type: "string",
+              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -408,12 +436,7 @@ async function reviewMergeRequestWithTools(params: {
       const argsRaw = toolCall.function.arguments ?? "{}";
       let toolContent: string;
 
-      if (toolCall.function.name !== TOOL_NAME_GET_FILE) {
-        toolContent = JSON.stringify({
-          ok: false,
-          error: `Unknown tool "${toolCall.function.name}"`,
-        });
-      } else {
+      if (toolCall.function.name === TOOL_NAME_GET_FILE) {
         try {
           const parsed = JSON.parse(argsRaw) as { path?: string; ref?: string };
           const path = parsed.path?.trim();
@@ -454,6 +477,44 @@ async function reviewMergeRequestWithTools(params: {
             raw: argsRaw,
           });
         }
+      } else if (toolCall.function.name === TOOL_NAME_GREP) {
+        try {
+          const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
+          const query = parsed.query?.trim();
+          if (query == null || query === "") {
+            toolContent = JSON.stringify({ ok: false, error: "query is required." });
+          } else {
+            const ref = parsed.ref?.trim() || refs.head;
+            const results = await searchRepository({
+              gitLabBaseUrl: gitLabProjectApiUrl,
+              headers,
+              query,
+              ref,
+              projectId,
+            });
+            if (results instanceof Error) {
+              toolContent = JSON.stringify({ ok: false, query, ref, error: results.message });
+            } else {
+              const trimmed = results.map((r) => ({
+                path: r.path,
+                startline: r.startline,
+                data: r.data.slice(0, 2000),
+              }));
+              toolContent = JSON.stringify({ ok: true, query, ref, matches: trimmed });
+            }
+          }
+        } catch (error: any) {
+          toolContent = JSON.stringify({
+            ok: false,
+            error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
+            raw: argsRaw,
+          });
+        }
+      } else {
+        toolContent = JSON.stringify({
+          ok: false,
+          error: `Unknown tool "${toolCall.function.name}"`,
+        });
       }
 
       messages.push({
@@ -561,6 +622,7 @@ async function main(): Promise<void> {
       head: mrChanges.diff_refs?.head_sha ?? "HEAD",
     },
     gitLabProjectApiUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+    projectId,
     headers,
   });
 

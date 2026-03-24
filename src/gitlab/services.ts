@@ -218,6 +218,51 @@ export const postMergeRequestNote: GitLabFetchFunction<
   }
 };
 
+interface SearchRepositoryParams {
+  query: string;
+  ref: string;
+  projectId: string | number;
+}
+export interface SearchBlobResult {
+  path: string;
+  data: string;
+  startline: number;
+  ref: string;
+}
+type SearchRepositoryResult = SearchBlobResult[] | GitLabError;
+export const searchRepository: GitLabFetchFunction<
+  SearchRepositoryParams,
+  SearchRepositoryResult
+> = async ({ gitLabBaseUrl, headers, query, ref, projectId }) => {
+  const url = new URL(`${gitLabBaseUrl}/projects/${projectId}/search`);
+  url.searchParams.set("scope", "blobs");
+  url.searchParams.set("search", query);
+  url.searchParams.set("ref", ref);
+  url.searchParams.set("per_page", "10");
+  let res: Response | Error;
+  try {
+    res = await fetch(url, { headers: { ...headers } });
+  } catch (error: any) {
+    res = error;
+  }
+  if (res instanceof Error || !res.ok) {
+    const responseDetails = await (async () => {
+      if (res instanceof Error) {
+        return { url: url.toString(), error: { name: res.name, message: res.message } };
+      }
+      const bodyText = await res.text().catch(() => "");
+      return { url: url.toString(), status: res.status, statusText: res.statusText, body: bodyText.slice(0, 1000) };
+    })();
+    return new GitLabError({
+      name: "SEARCH_FAILED",
+      message: `Repository search failed for query "${query}"`,
+      statusCode: res instanceof Error ? 502 : res.status,
+      cause: responseDetails,
+    });
+  }
+  return (await res.json()) as SearchBlobResult[];
+};
+
 export interface MergeRequestChangesDiffRef {
   base_sha?: string;
   head_sha?: string;
