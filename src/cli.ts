@@ -706,9 +706,19 @@ async function reviewMergeRequestWithTools(params: {
     }
   }
 
-  throw new Error(
-    `Exceeded max tool rounds (${MAX_TOOL_ROUNDS}) while generating review`,
-  );
+  // Graceful fallback: ask model for a final best-effort answer
+  // using already collected context, without allowing more tool calls.
+  messages.push({
+    role: "user",
+    content: `Tool-call limit reached (${MAX_TOOL_ROUNDS}). Do not call any tools. Provide your best-effort final review now, strictly following the required output format. If confidence is low, return the exact no-issues sentence.`,
+  });
+  const finalCompletion = await openaiInstance.chat.completions.create({
+    model: aiModel,
+    temperature: 0.2,
+    stream: false,
+    messages,
+  });
+  return buildAnswer(finalCompletion);
 }
 
 async function main(): Promise<void> {
