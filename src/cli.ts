@@ -4,6 +4,7 @@
 import OpenAI from "openai";
 import type { ChatModel } from "openai/resources/index.mjs";
 import type { ChatCompletionMessageParam } from "openai/resources/index.js";
+import { readFile } from "node:fs/promises";
 import {
   buildAnswer,
   buildPrompt,
@@ -28,6 +29,7 @@ function printHelp(): void {
       "  gitlab-ai-review --ci",
       "  gitlab-ai-review --worktree",
       "  gitlab-ai-review --last-commit",
+      "  gitlab-ai-review --diff-file=./changes.diff",
       "  gitlab-ai-review --help",
       "  gitlab-ai-review --debug",
       "  gitlab-ai-review --ci --ignore-ext=md,lock",
@@ -36,6 +38,7 @@ function printHelp(): void {
       "  --ci           Run in GitLab MR pipeline: fetch MR changes and post a new MR note.",
       "  --worktree     Review local uncommitted changes (staged + unstaged) and print to stdout.",
       "  --last-commit  Review last commit (HEAD) and print to stdout.",
+      "  --diff-file    Review git-diff content from a file and print to stdout.",
       "",
       "Debug:",
       "  --debug        Print full error details (stack, API error fields).",
@@ -179,6 +182,31 @@ function parsePromptLimits(argv: string[]): PromptLimits {
   };
 }
 
+function parseDiffFileFlag(argv: string[]): string | undefined {
+  const args = argv.slice(2);
+  for (const current of args) {
+    if (current === "--diff-file") {
+      throw new Error("Use equals format: --diff-file=./path/to/file.diff");
+    }
+    if (!current.startsWith("--diff-file=")) continue;
+    const value = current.slice("--diff-file=".length).trim();
+    if (value === "") {
+      throw new Error(
+        "Missing value for --diff-file. Example: --diff-file=./changes.diff",
+      );
+    }
+    return value;
+  }
+  return undefined;
+}
+
+function hasModeFlag(argv: string[]): boolean {
+  const args = new Set(argv.slice(2));
+  return (
+    args.has("--ci") || args.has("--worktree") || args.has("--last-commit")
+  );
+}
+
 function hasIgnoredExtension(
   filePath: string,
   ignoredExtensions: readonly string[],
@@ -274,6 +302,123 @@ async function localDiffLastCommit(): Promise<string> {
   return await runGit(args);
 }
 
+async function diffFromFile(filePath: string): Promise<string> {
+  const text = await readFile(filePath, "utf8");
+  return text;
+}
+
+interface DeterministicFinding {
+  title: string;
+  detail: string;
+}
+
+function editDistanceAtMostTwo(a: string, b: string): number {
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > 2) return 3;
+  const dp: number[][] = Array.from({ length: la + 1 }, (_, i) =>
+    Array.from({ length: lb + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  );
+  for (let i = 1; i <= la; i += 1) {
+    let rowMin = Number.POSITIVE_INFINITY;
+    for (let j = 1; j <= lb; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i]![j] = Math.min(
+        dp[i - 1]![j]! + 1,
+        dp[i]![j - 1]! + 1,
+        dp[i - 1]![j - 1]! + cost,
+      );
+      rowMin = Math.min(rowMin, dp[i]![j]!);
+    }
+    if (rowMin > 2) return 3;
+  }
+  return dp[la]![lb]!;
+}
+
+function collectCallIdentifiersFromDiffLines(
+  lines: string[],
+  prefixes: string[],
+): Set<string> {
+  const out = new Set<string>();
+  const callPattern = /\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+  for (const line of lines) {
+    if (!prefixes.some((p) => line.startsWith(p))) continue;
+    const code = line.slice(1);
+    let match: RegExpExecArray | null;
+    while ((match = callPattern.exec(code)) != null) {
+      const ident = match[1]!;
+      // Ignore common JS control keywords.
+      if (
+        ident === "if" ||
+        ident === "for" ||
+        ident === "while" ||
+        ident === "switch" ||
+        ident === "catch"
+      ) {
+        continue;
+      }
+      out.add(ident);
+    }
+  }
+  return out;
+}
+
+function findDeterministicDiffFindings(diff: string): DeterministicFinding[] {
+  const lines = diff.split(/\r?\n/);
+  const addedCalls = collectCallIdentifiersFromDiffLines(lines, ["+"]);
+  const nearbyCalls = collectCallIdentifiersFromDiffLines(lines, [
+    " ",
+    "-",
+    "+",
+  ]);
+  const findings: DeterministicFinding[] = [];
+  for (const added of addedCalls) {
+    if (added.length < 7) continue;
+    let closest: string | undefined;
+    let closestDistance = 3;
+    for (const candidate of nearbyCalls) {
+      if (candidate === added) continue;
+      const distance = editDistanceAtMostTwo(added, candidate);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closest = candidate;
+      }
+    }
+    if (closest != null && closestDistance <= 2) {
+      findings.push({
+        title: "Possible symbol typo",
+        detail: `Call \`${added}(...)\` is very close to \`${closest}(...)\` and may be a misspelling causing runtime/reference errors.`,
+      });
+    }
+  }
+  // De-duplicate repeated matches.
+  return Array.from(
+    new Map(findings.map((f) => [`${f.title}:${f.detail}`, f])).values(),
+  ).slice(0, 3);
+}
+
+function injectDeterministicFindings(
+  answer: string,
+  findings: DeterministicFinding[],
+): string {
+  if (findings.length === 0) return answer;
+  const noIssues = answer.includes(
+    "No confirmed bugs or high-value optimizations found.",
+  );
+  if (!noIssues) return answer;
+  const bullets = findings
+    .map((f) => `- [high] ${f.title}: ${f.detail}`)
+    .join("\n");
+  const disclaimerIndex = answer.indexOf(
+    "\n---\n_This comment was generated by an artificial intelligence duck._",
+  );
+  const disclaimer =
+    disclaimerIndex >= 0
+      ? answer.slice(disclaimerIndex)
+      : "\n---\n_This comment was generated by an artificial intelligence duck._";
+  return `${bullets}${disclaimer}`;
+}
+
 async function reviewDiffToConsole(
   diff: string,
   openaiApiKey: string,
@@ -297,7 +442,12 @@ async function reviewDiffToConsole(
     aiModel,
   );
   const answer = buildAnswer(completion);
-  process.stdout.write(`${answer}\n`);
+  const deterministicFindings = findDeterministicDiffFindings(diff);
+  const finalAnswer = injectDeterministicFindings(
+    answer,
+    deterministicFindings,
+  );
+  process.stdout.write(`${finalAnswer}\n`);
 }
 
 const TOOL_NAME_GET_FILE = "get_file_at_ref";
@@ -398,7 +548,8 @@ async function reviewMergeRequestWithTools(params: {
           properties: {
             query: {
               type: "string",
-              description: "Search string (keyword, function name, variable, etc.).",
+              description:
+                "Search string (keyword, function name, variable, etc.).",
             },
             ref: {
               type: "string",
@@ -479,10 +630,16 @@ async function reviewMergeRequestWithTools(params: {
         }
       } else if (toolCall.function.name === TOOL_NAME_GREP) {
         try {
-          const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
+          const parsed = JSON.parse(argsRaw) as {
+            query?: string;
+            ref?: string;
+          };
           const query = parsed.query?.trim();
           if (query == null || query === "") {
-            toolContent = JSON.stringify({ ok: false, error: "query is required." });
+            toolContent = JSON.stringify({
+              ok: false,
+              error: "query is required.",
+            });
           } else {
             const ref = parsed.ref?.trim() || refs.head;
             const results = await searchRepository({
@@ -493,14 +650,24 @@ async function reviewMergeRequestWithTools(params: {
               projectId,
             });
             if (results instanceof Error) {
-              toolContent = JSON.stringify({ ok: false, query, ref, error: results.message });
+              toolContent = JSON.stringify({
+                ok: false,
+                query,
+                ref,
+                error: results.message,
+              });
             } else {
               const trimmed = results.map((r) => ({
                 path: r.path,
                 startline: r.startline,
                 data: r.data.slice(0, 2000),
               }));
-              toolContent = JSON.stringify({ ok: true, query, ref, matches: trimmed });
+              toolContent = JSON.stringify({
+                ok: true,
+                query,
+                ref,
+                matches: trimmed,
+              });
             }
           }
         } catch (error: any) {
@@ -531,11 +698,27 @@ async function reviewMergeRequestWithTools(params: {
 }
 
 async function main(): Promise<void> {
-  const mode = parseMode(process.argv);
+  const diffFilePath = parseDiffFileFlag(process.argv);
+  if (diffFilePath != null && hasModeFlag(process.argv)) {
+    throw new Error(
+      "Do not combine --diff-file with --ci/--worktree/--last-commit",
+    );
+  }
+  const mode = diffFilePath != null ? "worktree" : parseMode(process.argv);
   const ignoredExtensions = parseIgnoreExtensions(process.argv);
   const promptLimits = parsePromptLimits(process.argv);
 
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
+
+  if (diffFilePath != null) {
+    logStep(`Reading diff file: ${diffFilePath}`);
+    const openaiEnvs = requireEnvs(["OPENAI_API_KEY"]);
+    const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
+    const diff = await diffFromFile(diffFilePath);
+    logStep(`Requesting AI completion with model: ${aiModel}`);
+    await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    return;
+  }
 
   if (mode === "worktree") {
     logStep("Collecting local changes");
