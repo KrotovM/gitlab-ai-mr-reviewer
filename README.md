@@ -36,16 +36,16 @@ Run locally to review diffs and print the review to stdout.
 
 ```bash
 # review local uncommitted changes
-OPENAI_API_KEY=... npx -y @krotovm/gitlab-ai-review --worktree
+npx -y @krotovm/gitlab-ai-review --worktree
 
 # review last commit and ignore docs/lock changes by extension
-OPENAI_API_KEY=... npx -y @krotovm/gitlab-ai-review --last-commit --ignore-ext=md,lock
+npx -y @krotovm/gitlab-ai-review --last-commit --ignore-ext=md,lock
 
 # review a prepared git diff from file
-OPENAI_API_KEY=... npx -y @krotovm/gitlab-ai-review --diff-file=./changes.diff
+npx -y @krotovm/gitlab-ai-review --diff-file=./changes.diff
 
 # use a custom OpenAI-compatible endpoint
-OPENAI_API_KEY=... OPENAI_BASE_URL="https://api.openai.com/v1" npx -y @krotovm/gitlab-ai-review --worktree
+OPENAI_BASE_URL="https://api.openai.com/v1" npx -y @krotovm/gitlab-ai-review --worktree
 ```
 
 ## Env variables
@@ -56,6 +56,7 @@ Set these in your project/group CI settings (or locally in your shell):
 - `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
 - `PROJECT_ACCESS_TOKEN` (optional but recommended for private projects; token with `api` scope)
+- `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
 
 `OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
 
