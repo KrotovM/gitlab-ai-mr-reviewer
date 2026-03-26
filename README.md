@@ -2,13 +2,13 @@
 
 # AI Code Reviewer
 
-Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automatically review code changes and output a Markdown review (either to GitLab merge requests via CI, or to your local console).
+Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
 
 ## Features
 
 - Automatically reviews code changes in GitLab repositories
 - Provides feedback on bugs and optimization opportunities
-- Generates Markdown-formatted responses for easy readability in GitLab
+- Generates Markdown-formatted responses for easy readability in GitLab as merge request comment
 
 ## Usage
 
@@ -27,25 +27,7 @@ ai_review:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:
-    - npx -y @krotovm/gitlab-ai-review --ci
-```
-
-### Local CLI
-
-Run locally to review diffs and print the review to stdout.
-
-```bash
-# review local uncommitted changes
-npx -y @krotovm/gitlab-ai-review --worktree
-
-# review last commit and ignore docs/lock changes by extension
-npx -y @krotovm/gitlab-ai-review --last-commit --ignore-ext=md,lock
-
-# review a prepared git diff from file
-npx -y @krotovm/gitlab-ai-review --diff-file=./changes.diff
-
-# use a custom OpenAI-compatible endpoint
-OPENAI_BASE_URL="https://api.openai.com/v1" npx -y @krotovm/gitlab-ai-review --worktree
+    - npx -y @krotovm/gitlab-ai-review
 ```
 
 ## Env variables
@@ -69,14 +51,10 @@ GitLab provides these automatically in Merge Request pipelines:
 
 ## Flags
 
-- `--ci` - Run in GitLab MR pipeline mode and post a new MR note.
-- `--worktree` - Review local uncommitted changes (staged + unstaged).
-- `--last-commit` - Review the last commit (`HEAD`).
-- `--diff-file=./changes.diff` - Review git-diff content from a file and print to stdout.
 - `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated only).
 - `--max-diffs=50` - Max number of diffs included in the prompt.
-- `--max-diff-chars=16000` - Max chars per diff chunk (local modes / single-pass fallback).
-- `--max-total-prompt-chars=220000` - Final hard cap for prompt size (local modes / single-pass fallback).
+- `--max-diff-chars=16000` - Max chars per diff chunk (single-pass fallback only).
+- `--max-total-prompt-chars=220000` - Final hard cap for prompt size (single-pass fallback only).
 - `--max-findings=5` - Max findings in the final review (CI multi-pass only).
 - `--max-review-concurrency=5` - Parallel per-file review API calls (CI multi-pass only).
 - `--debug` - Print full error details (stack and API error fields).
@@ -84,7 +62,7 @@ GitLab provides these automatically in Merge Request pipelines:
 
 ## Architecture
 
-In CI MR mode, the reviewer uses a three-pass pipeline optimised for large merge requests:
+The reviewer uses a three-pass pipeline optimised for large merge requests:
 
 1. **Triage** — a fast LLM call classifies each changed file as `NEEDS_REVIEW` or `SKIP` (cosmetic-only changes, docs, config) and produces a short MR summary.
 2. **Per-file review** — only `NEEDS_REVIEW` files are reviewed, each in a dedicated LLM call running in parallel (with tool access to fetch full files or grep the repository). Each file gets full model attention instead of competing for it across a single giant prompt.
@@ -92,4 +70,4 @@ In CI MR mode, the reviewer uses a three-pass pipeline optimised for large merge
 
 If the triage pass fails (API error, unparseable response), the pipeline falls back to the original single-pass approach automatically.
 
-Local modes (`--worktree`, `--last-commit`, `--diff-file`) use a simpler single-pass pipeline.
+The CI pipeline falls back to a simpler single-pass review automatically when triage cannot be used.
