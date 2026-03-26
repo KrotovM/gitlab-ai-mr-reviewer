@@ -62,12 +62,10 @@ GitLab provides these automatically in Merge Request pipelines:
 
 ## Architecture
 
-The reviewer uses a three-pass pipeline optimised for large merge requests:
+The reviewer uses a three-pass pipeline optimized for large merge requests:
 
-1. **Triage** — a fast LLM call classifies each changed file as `NEEDS_REVIEW` or `SKIP` (cosmetic-only changes, docs, config) and produces a short MR summary.
-2. **Per-file review** — only `NEEDS_REVIEW` files are reviewed, each in a dedicated LLM call running in parallel (with tool access to fetch full files or grep the repository). Each file gets full model attention instead of competing for it across a single giant prompt.
-3. **Consolidate** — all per-file findings are merged, deduplicated, ranked by severity, and trimmed to the top N (default 5).
+1. **Triage** - A fast LLM pass classifies each changed file as `NEEDS_REVIEW` or `SKIP` and generates a short MR summary.
+2. **Per-file review** - Only `NEEDS_REVIEW` files are reviewed, each in a dedicated LLM call running in parallel (with tools to fetch full files or grep the repository).
+3. **Consolidate** - Per-file findings are merged, deduplicated, ranked by severity, and trimmed to top N (default 5).
 
 If the triage pass fails (API error, unparseable response), the pipeline falls back to the original single-pass approach automatically.
-
-The CI pipeline falls back to a simpler single-pass review automatically when triage cannot be used.
