@@ -32,14 +32,12 @@ export interface BuildPromptParameters {
   changes: Array<{ diff: string }>;
   limits?: Partial<PromptLimits>;
   allowTools?: boolean;
-  additionalContext?: string;
 }
 
 export const buildPrompt = ({
   changes,
   limits,
   allowTools = false,
-  additionalContext,
 }: BuildPromptParameters): ChatCompletionMessageParam[] => {
   const effectiveLimits: PromptLimits = {
     ...DEFAULT_PROMPT_LIMITS,
@@ -80,9 +78,6 @@ export const buildPrompt = ({
   const userContent = [
     `Review the following code changes (git diff format). ${stats}`,
     toolNote,
-    additionalContext?.trim()
-      ? `\nAdditional local context (best-effort snippets):\n${additionalContext}`
-      : "",
     "",
     "Changes:",
     changesText || "(no changes provided)",

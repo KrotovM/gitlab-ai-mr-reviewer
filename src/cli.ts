@@ -50,7 +50,7 @@ function printHelp(): void {
       "  OPENAI_API_KEY (required)  OpenAI API key.",
       "  OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.",
       "  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.",
-      "  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (recommended for private projects).",
+      "  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (required for most private repos; should have api scope).",
       "",
       "CI-only env vars (provided by GitLab):",
       "  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN (only if PROJECT_ACCESS_TOKEN is not set)",
