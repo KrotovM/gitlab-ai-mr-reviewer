@@ -32,12 +32,12 @@ ai_review:
 
 ## Env variables
 
-Set these in your project/group CI settings (or locally in your shell):
+Set these in your project/group CI settings:
 
 - `OPENAI_API_KEY` (required)
 - `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
-- `PROJECT_ACCESS_TOKEN` (optional but recommended for private projects; token with `api` scope)
+- `PROJECT_ACCESS_TOKEN` (optional for public projects, but required for most private projects; token with `api` scope)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
 
 `OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
