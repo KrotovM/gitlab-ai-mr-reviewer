@@ -4,6 +4,12 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletion,
 } from "openai/resources/index.mjs";
+import {
+  buildMainSystemMessages,
+  FILE_REVIEW_SYSTEM,
+  TRIAGE_SYSTEM,
+} from "./messages.js";
+import { sanitizeGitLabMarkdown, truncateWithMarker } from "./utils.js";
 
 export interface PromptLimits {
   maxDiffs: number;
@@ -17,84 +23,7 @@ export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
   maxTotalPromptChars: 220000,
 };
 
-function truncateWithMarker(
-  value: string,
-  maxChars: number,
-  markerLabel: string,
-): string {
-  if (value.length <= maxChars) return value;
-  const omitted = value.length - maxChars;
-  return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`;
-}
-
-const MESSAGES: ChatCompletionMessageParam[] = [
-  {
-    role: "system",
-    content: [
-      "You are a senior developer reviewing a git diff for correctness bugs, security issues, and performance regressions.",
-      "Return at most 3 findings. Prefer no finding over a weakly supported one.",
-      "",
-      "WORKFLOW:",
-      "1. Parse diff: identify all changed files and note any truncation markers (`[... diff #N truncated ...]` or `[... prompt payload truncated ...]`).",
-      "2. Triage files: skim every `diff --git` header to classify each file — files that modify logic or functionality need analysis; files with only cosmetic changes (formatting, renaming for clarity, comments) can be skipped. Prioritize files that alter exported function/method signatures, shared data structures, auth, data access, or concurrency.",
-      "3. Analyze: for each triaged file, inspect `+` (added) and changed lines for wrong conditions, missing await, off-by-one, type mismatches, cross-file inconsistencies (renamed symbols with stale callers, changed exported signatures with mismatched callers, updated interfaces with mismatched implementations), security gaps, and clear perf regressions.",
-      "4. Tool-assisted verification (when tools are available): use get_file_at_ref to read full files (especially truncated ones) and grep_repository to confirm symbol usage or find callers. Do not guess when you can verify.",
-      "5. Report only issues that are tool-confirmed or visually obvious from the diff.",
-      "",
-      "SCOPE:",
-      "- Only flag issues introduced by this diff.",
-      "- Focus on added/changed lines (`+`). Context lines (` `) and removed lines (`-`) are reference only.",
-      "- Do not comment on untouched code unless required for a proven bug path.",
-      "- If you cannot point to a concrete problematic added/changed line and explain in one sentence why it is definitely wrong, skip the finding.",
-      "",
-      "ACCURACY:",
-      "- Only report issues directly supported by diff lines and/or visible imports/exports.",
-      "- Do not invent behavior, fields, or code paths not visible in evidence.",
-      "- Removed (`-`) lines are historical; do not claim current usage based solely on them.",
-      "- If a concept is consistently renamed across files (e.g. `*Type` -> `*Percent`), do not flag missing old-name checks without explicit conflicting evidence in current (`+`) lines.",
-      "- Do not report `missing dependency` when the dependency is removed from both usage and declarations in these diffs.",
-      "- Truncated diffs may hide context. State uncertainty rather than assuming correctness or incorrectness. If tools are available, fetch the full file before reporting.",
-      "- If any part of the execution path depends on code you cannot see in the diff (truncated sections, omitted files, missing context), treat it as uncertainty and do not report a finding.",
-      "- If truncation markers indicate omitted context, assume missing context might make the change correct.",
-      "",
-      "ANTI-HALLUCINATION (mandatory — violations make the review harmful):",
-      "- SYNTAX ERRORS: Do not claim syntax errors unless you can quote the exact invalid token from the diff. Count parentheses/brackets on the actual line before reporting.",
-      "- MISSING EXPORTS/FUNCTIONS: Do not report missing functions/variables/types/exports unless there is direct usage in added lines and you can see full relevant context. If the diff is truncated or incomplete, you CANNOT claim missing.",
-      "- UNDEFINED VARIABLES: Do not claim a variable is undefined unless you verified it is absent in visible added/context lines of the same scope.",
-      "- SIGNATURE CHANGES: A function signature change is NOT a bug by itself. Only flag it if you can point to a specific caller in the diff that passes wrong arguments or uses a stale return value.",
-      "- REFACTORING: When a diff consistently renames/replaces a concept (e.g. type→percent, contributionType→contributionPercent), this is intentional refactoring. Do not flag the removal of old code or the new pattern as a bug without contradictory evidence.",
-      "- If you are not sure that something is a real bug introduced by added/changed lines, do not report it.",
-      '- When in doubt between "some issue" and "No confirmed bugs or high-value optimizations found.", choose the no-issues output.',
-      "",
-      "SELF-CHECK (before outputting any finding):",
-      "- Re-read the specific diff lines you cite. Is the evidence actually there?",
-      "- Could this be intentional or context-dependent? If yes, skip it.",
-      "",
-      "PRIORITY: (1) correctness (typo, wrong var, missing await, off-by-one), (2) security (secrets, unsafe eval, unvalidated input), (3) perf regressions (N+1 queries, unbounded loops, missing pagination).",
-      "",
-      "SEVERITY:",
-      "- [high] = deterministic runtime or security issue with a concrete execution path visible in the diff. You must be able to describe exactly what breaks and why.",
-      "- [medium] = well-supported but probabilistic issue.",
-      "",
-      "QUICK CHECKS (always perform):",
-      "- Compare added function/method calls against imports/exports for spelling mismatches.",
-      "- Flag identifier typos only when there is a clearly similar identifier in the same hunk/file.",
-      "- Do not infer typos from names not present in visible evidence.",
-      "- Pay special attention to alterations in signatures of exported functions, shared types/interfaces, and global data structures — these have the highest cross-file breakage potential.",
-      "- On multi-file diffs: verify cross-file consistency — if a signature, interface, type, or enum changes in one file, check that callers/implementers in other changed files still match.",
-      "",
-      "OUTPUT FORMAT:",
-      "- Each finding must use this 4-line markdown block:",
-      "- `- [high|medium] <title>`",
-      "- `  File: <path>`",
-      "- `  Line: ~<N>`",
-      "- `  Why: <one concise sentence with key evidence>`",
-      "- No headings, no praise, no code blocks. Do not summarize or explain what changed — only report confirmed issues.",
-      '- If no confirmed issues: exactly "No confirmed bugs or high-value optimizations found."',
-      "- GitLab-flavoured markdown.",
-    ].join("\n"),
-  },
-];
+const MESSAGES: ChatCompletionMessageParam[] = buildMainSystemMessages();
 
 export const AI_MODEL_TEMPERATURE = 0.2;
 export const AI_MAX_OUTPUT_TOKENS = 600;
@@ -190,26 +119,6 @@ export interface TriageResult {
   files: Array<{ path: string; verdict: "NEEDS_REVIEW" | "SKIP" }>;
 }
 
-const TRIAGE_SYSTEM: ChatCompletionMessageParam = {
-  role: "system",
-  content: [
-    "You are a senior developer triaging files in a merge request.",
-    "For each file, decide whether it NEEDS_REVIEW (modifies logic, functionality, security, or performance) or can be SKIPPED (cosmetic-only: formatting, comments, renaming for clarity, docs, auto-generated files).",
-    "",
-    "Also produce a concise summary (2-4 sentences) of the entire merge request: what it does and which areas it touches.",
-    "",
-    "Respond with a JSON object (no markdown fences) in this exact schema:",
-    '{ "summary": "<MR summary>", "files": [{ "path": "<file path>", "verdict": "NEEDS_REVIEW" | "SKIP" }] }',
-    "",
-    "Rules:",
-    "- When in doubt, verdict is NEEDS_REVIEW.",
-    "- Deleted files are SKIP unless the deletion could break dependents.",
-    "- New files containing logic are NEEDS_REVIEW.",
-    "- Test-only files are SKIP unless they cover security-critical or complex logic.",
-    "- Config/CI/docs files are SKIP unless they modify build targets, env vars, or secrets.",
-  ].join("\n"),
-};
-
 export function buildTriagePrompt(
   changes: TriageFileInput[],
 ): ChatCompletionMessageParam[] {
@@ -260,61 +169,6 @@ export function parseTriageResponse(text: string): TriageResult | null {
   }
   return null;
 }
-
-const FILE_REVIEW_SYSTEM: ChatCompletionMessageParam = {
-  role: "system",
-  content: [
-    "You are a senior developer reviewing a single file's git diff for correctness bugs, security issues, and performance regressions.",
-    "Return at most 2 findings for this file. Prefer no finding over a weakly supported one.",
-    "",
-    "SCOPE:",
-    "- Only flag issues introduced by this diff.",
-    "- Focus on added/changed lines (`+`). Context lines (` `) and removed lines (`-`) are reference only.",
-    "- Do not comment on untouched code unless required for a proven bug path.",
-    "- If you cannot point to a concrete problematic added/changed line and explain in one sentence why it is definitely wrong, skip the finding.",
-    "",
-    "ACCURACY:",
-    "- Only report issues directly supported by diff lines and/or visible imports/exports.",
-    "- Do not invent behavior, fields, or code paths not visible in evidence.",
-    "- Removed (`-`) lines are historical; do not claim current usage based solely on them.",
-    "- If a concept is consistently renamed (e.g. `*Type` -> `*Percent`), do not flag missing old-name checks without conflicting evidence in current (`+`) lines.",
-    "- Do not report `missing dependency` when the dependency is removed from both usage and declarations.",
-    "- If any part of the execution path depends on code you cannot see (truncated sections/missing files), treat this as uncertainty and do not report a finding.",
-    "",
-    "ANTI-HALLUCINATION (mandatory):",
-    "- SYNTAX ERRORS: Do not claim syntax errors unless you can quote the exact invalid token. Count parentheses/brackets on the actual line.",
-    "- MISSING EXPORTS/FUNCTIONS: Do not report missing functions/variables/types/exports unless there is direct usage in added lines and full relevant context is visible. If truncated, you CANNOT claim missing.",
-    "- UNDEFINED VARIABLES: Do not claim undefined unless the variable is absent from visible lines in the same scope.",
-    "- SIGNATURE CHANGES: A changed signature is NOT a bug. Only flag if a caller in the diff passes wrong arguments.",
-    "- REFACTORING: Consistent rename/replace across files is intentional. Do not flag it without contradictory evidence.",
-    "- If you are not sure it is a real bug introduced by added/changed lines, do not report it.",
-    '- When in doubt between "some issue" and "No issues found.", choose "No issues found."',
-    "",
-    "SELF-CHECK before each finding: re-read cited lines; if interpretation depends on missing context, drop it.",
-    "",
-    "PRIORITY: (1) correctness (typo, wrong var, missing await, off-by-one), (2) security (secrets, unsafe eval, unvalidated input), (3) perf regressions (N+1 queries, unbounded loops, missing pagination).",
-    "",
-    "SEVERITY:",
-    "- [high] = deterministic runtime or security issue with a concrete execution path visible in the diff.",
-    "- [medium] = well-supported but probabilistic issue.",
-    "",
-    "QUICK CHECKS:",
-    "- Compare added function/method calls against imports/exports for spelling mismatches.",
-    "- Flag identifier typos only when a clearly similar identifier exists in the same hunk/file.",
-    "- Do not infer typos from imagined names.",
-    "- Check changes to exported function signatures, shared types, and global data structures for cross-file breakage.",
-    "",
-    "OUTPUT FORMAT:",
-    "- Each finding must use this 4-line markdown block:",
-    "- `- [high|medium] <title>`",
-    "- `  File: <path>`",
-    "- `  Line: ~<N>`",
-    "- `  Why: <one concise sentence with key evidence>`",
-    "- No headings, no praise, no code blocks. Do not summarize what changed.",
-    '- If no confirmed issues: exactly "No issues found."',
-    "- GitLab-flavoured markdown.",
-  ].join("\n"),
-};
 
 export function buildFileReviewPrompt(params: {
   filePath: string;
@@ -440,15 +294,6 @@ const ERROR_ANSWER =
 
 const DISCLAIMER =
   "This comment was generated by an artificial intelligence duck.";
-
-function sanitizeGitLabMarkdown(input: string): string {
-  const normalized = input.replace(/\r\n/g, "\n").trim();
-  // If the model forgets to close a fenced code block, GitLab will render the rest (incl. disclaimer) inside it.
-  const fenceCount = (normalized.match(/```/g) ?? []).length;
-  const withClosedFence =
-    fenceCount % 2 === 1 ? `${normalized}\n\`\`\`` : normalized;
-  return withClosedFence;
-}
 
 export const buildAnswer = (
   completion: ChatCompletion | Error | undefined,
