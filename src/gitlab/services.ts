@@ -3,7 +3,7 @@
 import type { ChatCompletion, ChatModel } from "openai/resources/index.mjs";
 import type { ChatCompletionMessageParam } from "openai/resources/index.js";
 import OpenAI from "openai";
-import { AI_MODEL_TEMPERATURE } from "../prompt/index.js";
+import { AI_MAX_OUTPUT_TOKENS, AI_MODEL_TEMPERATURE } from "../prompt/index.js";
 import {
   GitLabError,
   OpenAIError,
@@ -142,6 +142,7 @@ export async function generateAICompletion(
     completion = await openaiInstance.chat.completions.create({
       model: aiModel,
       temperature: AI_MODEL_TEMPERATURE,
+      max_tokens: AI_MAX_OUTPUT_TOKENS,
       stream: false,
       messages,
     });

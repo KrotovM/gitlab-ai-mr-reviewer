@@ -45,7 +45,7 @@ const MESSAGES: ChatCompletionMessageParam[] = [
       "- Only flag issues introduced by this diff.",
       "- Focus on added/changed lines (`+`). Context lines (` `) and removed lines (`-`) are reference only.",
       "- Do not comment on untouched code unless required for a proven bug path.",
-      "- If confidence is below medium, skip the finding.",
+      "- If you cannot point to a concrete problematic added/changed line and explain in one sentence why it is definitely wrong, skip the finding.",
       "",
       "ACCURACY:",
       "- Only report issues directly supported by diff lines and/or visible imports/exports.",
@@ -54,16 +54,32 @@ const MESSAGES: ChatCompletionMessageParam[] = [
       "- If a concept is consistently renamed across files (e.g. `*Type` -> `*Percent`), do not flag missing old-name checks without explicit conflicting evidence in current (`+`) lines.",
       "- Do not report `missing dependency` when the dependency is removed from both usage and declarations in these diffs.",
       "- Truncated diffs may hide context. State uncertainty rather than assuming correctness or incorrectness. If tools are available, fetch the full file before reporting.",
+      "- If any part of the execution path depends on code you cannot see in the diff (truncated sections, omitted files, missing context), treat it as uncertainty and do not report a finding.",
+      "- If truncation markers indicate omitted context, assume missing context might make the change correct.",
+      "",
+      "ANTI-HALLUCINATION (mandatory — violations make the review harmful):",
+      "- SYNTAX ERRORS: Do not claim syntax errors unless you can quote the exact invalid token from the diff. Count parentheses/brackets on the actual line before reporting.",
+      "- MISSING EXPORTS/FUNCTIONS: Do not report missing functions/variables/types/exports unless there is direct usage in added lines and you can see full relevant context. If the diff is truncated or incomplete, you CANNOT claim missing.",
+      "- UNDEFINED VARIABLES: Do not claim a variable is undefined unless you verified it is absent in visible added/context lines of the same scope.",
+      "- SIGNATURE CHANGES: A function signature change is NOT a bug by itself. Only flag it if you can point to a specific caller in the diff that passes wrong arguments or uses a stale return value.",
+      "- REFACTORING: When a diff consistently renames/replaces a concept (e.g. type→percent, contributionType→contributionPercent), this is intentional refactoring. Do not flag the removal of old code or the new pattern as a bug without contradictory evidence.",
+      "- If you are not sure that something is a real bug introduced by added/changed lines, do not report it.",
+      '- When in doubt between "some issue" and "No confirmed bugs or high-value optimizations found.", choose the no-issues output.',
+      "",
+      "SELF-CHECK (before outputting any finding):",
+      "- Re-read the specific diff lines you cite. Is the evidence actually there?",
+      "- Could this be intentional or context-dependent? If yes, skip it.",
       "",
       "PRIORITY: (1) correctness (typo, wrong var, missing await, off-by-one), (2) security (secrets, unsafe eval, unvalidated input), (3) perf regressions (N+1 queries, unbounded loops, missing pagination).",
       "",
       "SEVERITY:",
-      "- [high] = deterministic runtime or security issue visible in the diff.",
+      "- [high] = deterministic runtime or security issue with a concrete execution path visible in the diff. You must be able to describe exactly what breaks and why.",
       "- [medium] = well-supported but probabilistic issue.",
       "",
       "QUICK CHECKS (always perform):",
       "- Compare added function/method calls against imports/exports for spelling mismatches.",
-      "- Flag identifier typos that would cause runtime errors (symbol differs by 1-2 chars from a nearby known symbol).",
+      "- Flag identifier typos only when there is a clearly similar identifier in the same hunk/file.",
+      "- Do not infer typos from names not present in visible evidence.",
       "- Pay special attention to alterations in signatures of exported functions, shared types/interfaces, and global data structures — these have the highest cross-file breakage potential.",
       "- On multi-file diffs: verify cross-file consistency — if a signature, interface, type, or enum changes in one file, check that callers/implementers in other changed files still match.",
       "",
@@ -81,17 +97,20 @@ const MESSAGES: ChatCompletionMessageParam[] = [
 ];
 
 export const AI_MODEL_TEMPERATURE = 0.2;
+export const AI_MAX_OUTPUT_TOKENS = 600;
 
 export interface BuildPromptParameters {
   changes: Array<{ diff: string }>;
   limits?: Partial<PromptLimits>;
   allowTools?: boolean;
+  additionalContext?: string;
 }
 
 export const buildPrompt = ({
   changes,
   limits,
   allowTools = false,
+  additionalContext,
 }: BuildPromptParameters): ChatCompletionMessageParam[] => {
   const effectiveLimits: PromptLimits = {
     ...DEFAULT_PROMPT_LIMITS,
@@ -132,6 +151,9 @@ export const buildPrompt = ({
   const userContent = [
     `Review the following code changes (git diff format). ${stats}`,
     toolNote,
+    additionalContext?.trim()
+      ? `\nAdditional local context (best-effort snippets):\n${additionalContext}`
+      : "",
     "",
     "Changes:",
     changesText || "(no changes provided)",
@@ -249,7 +271,7 @@ const FILE_REVIEW_SYSTEM: ChatCompletionMessageParam = {
     "- Only flag issues introduced by this diff.",
     "- Focus on added/changed lines (`+`). Context lines (` `) and removed lines (`-`) are reference only.",
     "- Do not comment on untouched code unless required for a proven bug path.",
-    "- If confidence is below medium, skip the finding.",
+    "- If you cannot point to a concrete problematic added/changed line and explain in one sentence why it is definitely wrong, skip the finding.",
     "",
     "ACCURACY:",
     "- Only report issues directly supported by diff lines and/or visible imports/exports.",
@@ -257,16 +279,29 @@ const FILE_REVIEW_SYSTEM: ChatCompletionMessageParam = {
     "- Removed (`-`) lines are historical; do not claim current usage based solely on them.",
     "- If a concept is consistently renamed (e.g. `*Type` -> `*Percent`), do not flag missing old-name checks without conflicting evidence in current (`+`) lines.",
     "- Do not report `missing dependency` when the dependency is removed from both usage and declarations.",
+    "- If any part of the execution path depends on code you cannot see (truncated sections/missing files), treat this as uncertainty and do not report a finding.",
+    "",
+    "ANTI-HALLUCINATION (mandatory):",
+    "- SYNTAX ERRORS: Do not claim syntax errors unless you can quote the exact invalid token. Count parentheses/brackets on the actual line.",
+    "- MISSING EXPORTS/FUNCTIONS: Do not report missing functions/variables/types/exports unless there is direct usage in added lines and full relevant context is visible. If truncated, you CANNOT claim missing.",
+    "- UNDEFINED VARIABLES: Do not claim undefined unless the variable is absent from visible lines in the same scope.",
+    "- SIGNATURE CHANGES: A changed signature is NOT a bug. Only flag if a caller in the diff passes wrong arguments.",
+    "- REFACTORING: Consistent rename/replace across files is intentional. Do not flag it without contradictory evidence.",
+    "- If you are not sure it is a real bug introduced by added/changed lines, do not report it.",
+    '- When in doubt between "some issue" and "No issues found.", choose "No issues found."',
+    "",
+    "SELF-CHECK before each finding: re-read cited lines; if interpretation depends on missing context, drop it.",
     "",
     "PRIORITY: (1) correctness (typo, wrong var, missing await, off-by-one), (2) security (secrets, unsafe eval, unvalidated input), (3) perf regressions (N+1 queries, unbounded loops, missing pagination).",
     "",
     "SEVERITY:",
-    "- [high] = deterministic runtime or security issue visible in the diff.",
+    "- [high] = deterministic runtime or security issue with a concrete execution path visible in the diff.",
     "- [medium] = well-supported but probabilistic issue.",
     "",
     "QUICK CHECKS:",
     "- Compare added function/method calls against imports/exports for spelling mismatches.",
-    "- Flag identifier typos that would cause runtime errors.",
+    "- Flag identifier typos only when a clearly similar identifier exists in the same hunk/file.",
+    "- Do not infer typos from imagined names.",
     "- Check changes to exported function signatures, shared types, and global data structures for cross-file breakage.",
     "",
     "OUTPUT FORMAT:",
@@ -357,8 +392,9 @@ export function buildConsolidatePrompt(params: {
         "`  Why: <one concise sentence with key evidence>`",
         "Rank by: (1) [high] before [medium], (2) correctness > security > perf.",
         "Do not add new findings. Do not add headings, summaries, or commentary.",
+        "Drop any finding that: claims a syntax error without quoting the invalid token, claims a function/variable is missing without concrete proof, or flags a refactoring rename as a bug.",
         `If fewer than ${maxFindings} findings exist, return all of them.`,
-        'If all findings are low quality after dedup, return exactly: "No confirmed bugs or high-value optimizations found."',
+        'If all findings are low quality or dubious after dedup, return exactly: "No confirmed bugs or high-value optimizations found."',
         "GitLab-flavoured markdown.",
       ].join("\n"),
     },

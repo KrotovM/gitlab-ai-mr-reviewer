@@ -11,6 +11,7 @@ import {
   buildFileReviewPrompt,
   buildPrompt,
   buildTriagePrompt,
+  AI_MAX_OUTPUT_TOKENS,
   DEFAULT_MAX_FINDINGS,
   DEFAULT_PROMPT_LIMITS,
   DEFAULT_REVIEW_CONCURRENCY,
@@ -50,6 +51,7 @@ function printHelp(): void {
       "",
       "Debug:",
       "  --debug        Print full error details (stack, API error fields).",
+      "  --force-tools  Force at least one tool-call round in tool-enabled review paths.",
       "  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock",
       "  --max-diffs=50",
       "  --max-diff-chars=16000",
@@ -117,6 +119,45 @@ type Mode = "ci" | "worktree" | "last-commit";
 function hasDebugFlag(argv: string[]): boolean {
   const args = new Set(argv.slice(2));
   return args.has("--debug");
+}
+
+function hasForceToolsFlag(argv: string[]): boolean {
+  const args = new Set(argv.slice(2));
+  return args.has("--force-tools");
+}
+
+const DEBUG_MODE = hasDebugFlag(process.argv);
+const FORCE_TOOLS = hasForceToolsFlag(process.argv);
+
+function logDebug(message: string): void {
+  if (!DEBUG_MODE) return;
+  process.stdout.write(`[debug] ${message}\n`);
+}
+
+function logToolUsageMinimal(
+  toolName: string,
+  argsRaw: string,
+  contextFile?: string,
+): void {
+  try {
+    const parsed = JSON.parse(argsRaw) as { path?: string; query?: string };
+    if (toolName === TOOL_NAME_GET_FILE) {
+      const path = parsed.path?.trim() || "(unknown-path)";
+      const suffix = contextFile ? ` review_file=${contextFile}` : "";
+      logStep(`[tools] ${toolName} path=${path}${suffix}`);
+      return;
+    }
+    if (toolName === TOOL_NAME_GREP) {
+      const query = parsed.query?.trim() || "(empty-query)";
+      const suffix = contextFile ? ` review_file=${contextFile}` : "";
+      logStep(`[tools] ${toolName} query=${query}${suffix}`);
+      return;
+    }
+  } catch {
+    // Fall through to raw args logging.
+  }
+  const suffix = contextFile ? ` review_file=${contextFile}` : "";
+  logStep(`[tools] ${toolName} args=${argsRaw.slice(0, 120)}${suffix}`);
 }
 
 function parseIgnoreExtensions(argv: string[]): string[] {
@@ -298,6 +339,31 @@ async function runGit(args: string[]): Promise<string> {
   });
 }
 
+async function runCommand(command: string, args: string[]): Promise<string> {
+  const { spawn } = await import("node:child_process");
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => {
+      stdout += String(d);
+    });
+    child.stderr.on("data", (d) => {
+      stderr += String(d);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) return resolve(stdout);
+      reject(
+        new Error(
+          stderr.trim() ||
+            `${command} ${args.join(" ")} failed with exit code ${code}`,
+        ),
+      );
+    });
+  });
+}
+
 async function localDiffWorktree(): Promise<string> {
   const ignoreExtensions = parseIgnoreExtensions(process.argv);
   const pathspecs = buildGitExcludePathspecs(ignoreExtensions);
@@ -329,6 +395,67 @@ async function localDiffLastCommit(): Promise<string> {
 async function diffFromFile(filePath: string): Promise<string> {
   const text = await readFile(filePath, "utf8");
   return text;
+}
+
+function parseChangedPathsFromDiff(diff: string): string[] {
+  const paths: string[] = [];
+  const lines = diff.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.startsWith("diff --git ")) continue;
+    const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (match == null) continue;
+    const bPath = match[2]?.trim();
+    if (bPath && bPath !== "/dev/null") paths.push(bPath);
+  }
+  return Array.from(new Set(paths));
+}
+
+async function readLocalFileIfExists(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function readFileAtHead(path: string): Promise<string | null> {
+  try {
+    const text = await runGit(["show", `HEAD:${path}`]);
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+async function buildLocalReviewContext(diff: string): Promise<string> {
+  const MAX_FILES = 8;
+  const MAX_FILE_CHARS = 1200;
+  const paths = parseChangedPathsFromDiff(diff).slice(0, MAX_FILES);
+  if (paths.length === 0) return "";
+
+  const blocks: string[] = [];
+  for (const path of paths) {
+    const worktreeText = await readLocalFileIfExists(path);
+    const headText = await readFileAtHead(path);
+    const current = worktreeText?.slice(0, MAX_FILE_CHARS);
+    const previous = headText?.slice(0, MAX_FILE_CHARS);
+
+    if (current == null && previous == null) continue;
+
+    blocks.push(
+      [
+        `File: ${path}`,
+        current != null
+          ? `Current snippet:\n\`\`\`\n${current}\n\`\`\``
+          : "Current snippet: (unavailable)",
+        previous != null
+          ? `HEAD snippet:\n\`\`\`\n${previous}\n\`\`\``
+          : "HEAD snippet: (unavailable)",
+      ].join("\n"),
+    );
+  }
+
+  return blocks.join("\n\n");
 }
 
 interface DeterministicFinding {
@@ -454,9 +581,11 @@ async function reviewDiffToConsole(
     return;
   }
 
+  const localContext = await buildLocalReviewContext(diff);
   const messageParams = buildPrompt({
     changes: [{ diff }],
     limits: promptLimits,
+    additionalContext: localContext,
   });
 
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
@@ -465,6 +594,18 @@ async function reviewDiffToConsole(
     openaiInstance,
     aiModel,
   );
+  if (extractCompletionText(completion) == null) {
+    logStep(
+      "Primary completion was empty. Retrying once with local tool-enabled flow.",
+    );
+    await reviewDiffToConsoleWithToolsLocal(
+      diff,
+      openaiApiKey,
+      aiModel,
+      promptLimits,
+    );
+    return;
+  }
   const answer = buildAnswer(completion);
   const deterministicFindings = findDeterministicDiffFindings(diff);
   const finalAnswer = injectDeterministicFindings(
@@ -472,6 +613,287 @@ async function reviewDiffToConsole(
     deterministicFindings,
   );
   process.stdout.write(`${finalAnswer}\n`);
+}
+
+async function handleLocalGetFileTool(argsRaw: string): Promise<string> {
+  try {
+    const parsed = JSON.parse(argsRaw) as { path?: string; ref?: string };
+    const path = parsed.path?.trim();
+    const ref = (parsed.ref?.trim() || "WORKTREE").toUpperCase();
+    if (!path) {
+      return JSON.stringify({ ok: false, error: "path is required." });
+    }
+    if (ref === "WORKTREE") {
+      const text = await readLocalFileIfExists(path);
+      if (text == null) {
+        return JSON.stringify({
+          ok: false,
+          path,
+          ref,
+          error: "File not found in worktree.",
+        });
+      }
+      return JSON.stringify({
+        ok: true,
+        path,
+        ref,
+        content: text.slice(0, 30000),
+        truncated: text.length > 30000,
+      });
+    }
+    const text = await runGit(["show", `${ref}:${path}`]);
+    return JSON.stringify({
+      ok: true,
+      path,
+      ref,
+      content: text.slice(0, 30000),
+      truncated: text.length > 30000,
+    });
+  } catch (error: any) {
+    return JSON.stringify({
+      ok: false,
+      error: `Failed local get_file_at_ref: ${String(error?.message ?? error)}`,
+      raw: argsRaw,
+    });
+  }
+}
+
+async function handleLocalGrepTool(argsRaw: string): Promise<string> {
+  function parseSearchOutput(raw: string): Array<{
+    path: string;
+    startline: number;
+    data: string;
+  }> {
+    return raw
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        const m = /^(.+?):(\d+):(.*)$/.exec(line);
+        if (m == null) return null;
+        return {
+          path: m[1]!,
+          startline: Number(m[2]),
+          data: (m[3] ?? "").slice(0, 2000),
+        };
+      })
+      .filter(
+        (
+          v,
+        ): v is {
+          path: string;
+          startline: number;
+          data: string;
+        } => v != null,
+      )
+      .slice(0, 10);
+  }
+
+  try {
+    const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
+    const query = parsed.query?.trim();
+    if (!query) {
+      return JSON.stringify({ ok: false, error: "query is required." });
+    }
+    let raw = "";
+    let searchBackend: "rg" | "grep" = "rg";
+    try {
+      raw = await runCommand("rg", [
+        "-n",
+        "--no-heading",
+        "--max-count",
+        "30",
+        query,
+        ".",
+      ]);
+    } catch (error: any) {
+      if (String(error?.message ?? error).includes("spawn rg ENOENT")) {
+        searchBackend = "grep";
+        raw = await runCommand("grep", [
+          "-R",
+          "-n",
+          "-m",
+          "30",
+          "--",
+          query,
+          ".",
+        ]);
+      } else {
+        throw error;
+      }
+    }
+    const matches = parseSearchOutput(raw);
+    logDebug(
+      `local grep backend=${searchBackend} query="${query}" matches=${matches.length}`,
+    );
+    return JSON.stringify({
+      ok: true,
+      query,
+      ref: (parsed.ref?.trim() || "WORKTREE").toUpperCase(),
+      matches,
+    });
+  } catch (error: any) {
+    return JSON.stringify({
+      ok: false,
+      error: `Failed local grep_repository: ${String(error?.message ?? error)}`,
+      raw: argsRaw,
+    });
+  }
+}
+
+async function reviewDiffToConsoleWithToolsLocal(
+  diff: string,
+  openaiApiKey: string,
+  aiModel: ChatModel,
+  promptLimits: PromptLimits,
+): Promise<void> {
+  if (diff.trim() === "") {
+    process.stdout.write("No diff found. Skipping review.\n");
+    return;
+  }
+
+  const localContext = await buildLocalReviewContext(diff);
+  const messages: ChatCompletionMessageParam[] = buildPrompt({
+    changes: [{ diff }],
+    limits: promptLimits,
+    allowTools: true,
+    additionalContext: localContext,
+  });
+  messages.push({
+    role: "user",
+    content:
+      "Local review context: use ref=WORKTREE for current files, ref=HEAD for last commit snapshot.",
+  });
+
+  const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
+  const toolResultCache = new Map<string, string>();
+  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GET_FILE,
+        description:
+          "Fetch local file content. Use ref=WORKTREE for current file, ref=HEAD for committed snapshot.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string", description: "Repository file path." },
+            ref: {
+              type: "string",
+              description:
+                'Ref value: "WORKTREE" or "HEAD". Defaults to WORKTREE.',
+            },
+          },
+          required: ["path"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GREP,
+        description:
+          "Search current local repository with ripgrep. Returns up to 10 matches.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: {
+              type: "string",
+              description: "Search string (keyword, function, symbol).",
+            },
+            ref: {
+              type: "string",
+              description:
+                "Optional logical ref (WORKTREE/HEAD); search runs on current tree.",
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    const completion = await openaiInstance.chat.completions.create({
+      model: aiModel,
+      temperature: 0.2,
+      stream: false,
+      messages,
+      tools,
+      tool_choice: FORCE_TOOLS && round === 0 ? "required" : "auto",
+    });
+    const message = completion.choices[0]?.message;
+    if (message == null) {
+      process.stdout.write(`${buildAnswer(completion)}\n`);
+      return;
+    }
+
+    const toolCalls = message.tool_calls ?? [];
+    logDebug(
+      `local-review round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
+    );
+    if (toolCalls.length === 0) {
+      process.stdout.write(`${buildAnswer(completion)}\n`);
+      return;
+    }
+
+    messages.push({
+      role: "assistant",
+      content: message.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const toolCall of toolCalls) {
+      const argsRaw = toolCall.function.arguments ?? "{}";
+      logToolUsageMinimal(toolCall.function.name, argsRaw);
+      logDebug(
+        `tool request local id=${toolCall.id} name=${toolCall.function.name} args=${argsRaw.slice(0, 300)}`,
+      );
+      const cacheKey = `${toolCall.function.name}:${argsRaw}`;
+      const cached = toolResultCache.get(cacheKey);
+      let toolContent: string;
+      if (cached != null) {
+        toolContent = cached;
+        logDebug(
+          `tool cache hit local id=${toolCall.id} name=${toolCall.function.name}`,
+        );
+      } else if (toolCall.function.name === TOOL_NAME_GET_FILE) {
+        toolContent = await handleLocalGetFileTool(argsRaw);
+        toolResultCache.set(cacheKey, toolContent);
+      } else if (toolCall.function.name === TOOL_NAME_GREP) {
+        toolContent = await handleLocalGrepTool(argsRaw);
+        toolResultCache.set(cacheKey, toolContent);
+      } else {
+        toolContent = JSON.stringify({
+          ok: false,
+          error: `Unknown tool "${toolCall.function.name}"`,
+        });
+      }
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: toolContent,
+      });
+      logDebug(
+        `tool response local id=${toolCall.id} name=${toolCall.function.name} payload=${toolContent.slice(0, 300)}`,
+      );
+    }
+  }
+
+  messages.push({
+    role: "user",
+    content:
+      "Tool-call limit reached. Do not call tools anymore. Provide final review now in required format.",
+  });
+  const finalCompletion = await openaiInstance.chat.completions.create({
+    model: aiModel,
+    temperature: 0.2,
+    max_tokens: AI_MAX_OUTPUT_TOKENS,
+    stream: false,
+    messages,
+  });
+  process.stdout.write(`${buildAnswer(finalCompletion)}\n`);
 }
 
 const TOOL_NAME_GET_FILE = "get_file_at_ref";
@@ -594,12 +1016,15 @@ async function reviewMergeRequestWithTools(params: {
       stream: false,
       messages,
       tools,
-      tool_choice: "auto",
+      tool_choice: FORCE_TOOLS && round === 0 ? "required" : "auto",
     });
     const message = completion.choices[0]?.message;
     if (message == null) return buildAnswer(completion);
 
     const toolCalls = message.tool_calls ?? [];
+    logDebug(
+      `main-review round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
+    );
     if (toolCalls.length === 0) return buildAnswer(completion);
 
     messages.push({
@@ -610,6 +1035,10 @@ async function reviewMergeRequestWithTools(params: {
 
     for (const toolCall of toolCalls) {
       const argsRaw = toolCall.function.arguments ?? "{}";
+      logToolUsageMinimal(toolCall.function.name, argsRaw);
+      logDebug(
+        `tool request id=${toolCall.id} name=${toolCall.function.name} args=${argsRaw.slice(0, 300)}`,
+      );
       let toolContent: string;
 
       if (toolCall.function.name === TOOL_NAME_GET_FILE) {
@@ -714,6 +1143,9 @@ async function reviewMergeRequestWithTools(params: {
         tool_call_id: toolCall.id,
         content: toolContent,
       });
+      logDebug(
+        `tool response id=${toolCall.id} name=${toolCall.function.name} payload=${toolContent.slice(0, 300)}`,
+      );
     }
   }
 
@@ -726,6 +1158,7 @@ async function reviewMergeRequestWithTools(params: {
   const finalCompletion = await openaiInstance.chat.completions.create({
     model: aiModel,
     temperature: 0.2,
+    max_tokens: AI_MAX_OUTPUT_TOKENS,
     stream: false,
     messages,
   });
@@ -825,12 +1258,16 @@ async function runFileReviewWithTools(params: {
       stream: false,
       messages,
       tools,
-      tool_choice: "auto",
+      tool_choice: FORCE_TOOLS && round === 0 ? "required" : "auto",
     });
     const msg = completion.choices[0]?.message;
-    if (msg == null) return extractCompletionText(completion) ?? "No issues found.";
+    if (msg == null)
+      return extractCompletionText(completion) ?? "No issues found.";
 
     const toolCalls = msg.tool_calls ?? [];
+    logDebug(
+      `file-review path=${filePath} round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
+    );
     if (toolCalls.length === 0)
       return extractCompletionText(completion) ?? "No issues found.";
 
@@ -842,6 +1279,10 @@ async function runFileReviewWithTools(params: {
 
     for (const toolCall of toolCalls) {
       const argsRaw = toolCall.function.arguments ?? "{}";
+      logToolUsageMinimal(toolCall.function.name, argsRaw, filePath);
+      logDebug(
+        `tool request file=${filePath} id=${toolCall.id} name=${toolCall.function.name} args=${argsRaw.slice(0, 300)}`,
+      );
       let toolContent: string;
 
       if (toolCall.function.name === TOOL_NAME_GET_FILE) {
@@ -870,6 +1311,9 @@ async function runFileReviewWithTools(params: {
         tool_call_id: toolCall.id,
         content: toolContent,
       });
+      logDebug(
+        `tool response file=${filePath} id=${toolCall.id} name=${toolCall.function.name} payload=${toolContent.slice(0, 300)}`,
+      );
     }
   }
 
@@ -881,6 +1325,7 @@ async function runFileReviewWithTools(params: {
   const final = await openaiInstance.chat.completions.create({
     model: aiModel,
     temperature: 0.2,
+    max_tokens: AI_MAX_OUTPUT_TOKENS,
     stream: false,
     messages,
   });
@@ -1026,9 +1471,7 @@ async function reviewMergeRequestMultiPass(params: {
   } = params;
 
   // --- Pass 1: Triage + Summary ---
-  logStep(
-    `Pass 1/3: triaging ${changes.length} file(s)`,
-  );
+  logStep(`Pass 1/3: triaging ${changes.length} file(s)`);
 
   const triageInputs: TriageFileInput[] = changes.map((c) => ({
     path: c.new_path,
@@ -1054,7 +1497,9 @@ async function reviewMergeRequestMultiPass(params: {
       triageResult = parseTriageResponse(triageText);
     }
   } catch (error: any) {
-    logStep(`Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`);
+    logStep(
+      `Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`,
+    );
   }
 
   if (triageResult == null) {
@@ -1071,9 +1516,7 @@ async function reviewMergeRequestMultiPass(params: {
     });
   }
 
-  const triageMap = new Map(
-    triageResult.files.map((f) => [f.path, f.verdict]),
-  );
+  const triageMap = new Map(triageResult.files.map((f) => [f.path, f.verdict]));
   const reviewFiles = changes.filter(
     (c) => triageMap.get(c.new_path) !== "SKIP",
   );
@@ -1133,16 +1576,18 @@ async function reviewMergeRequestMultiPass(params: {
   }
 
   try {
-    const consolidateCompletion =
-      await openaiInstance.chat.completions.create({
-        model: aiModel,
-        temperature: 0.1,
-        stream: false,
-        messages: consolidateMessages,
-      });
+    const consolidateCompletion = await openaiInstance.chat.completions.create({
+      model: aiModel,
+      temperature: 0.1,
+      max_tokens: AI_MAX_OUTPUT_TOKENS,
+      stream: false,
+      messages: consolidateMessages,
+    });
     return buildAnswer(consolidateCompletion);
   } catch (error: any) {
-    logStep(`Consolidation failed: ${error?.message ?? error}. Returning raw per-file findings.`);
+    logStep(
+      `Consolidation failed: ${error?.message ?? error}. Returning raw per-file findings.`,
+    );
     const DISCLAIMER =
       "This comment was generated by an artificial intelligence duck.";
     const raw = perFileFindings
@@ -1191,7 +1636,16 @@ async function main(): Promise<void> {
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await diffFromFile(diffFilePath);
     logStep(`Requesting AI completion with model: ${aiModel}`);
-    await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    if (FORCE_TOOLS) {
+      await reviewDiffToConsoleWithToolsLocal(
+        diff,
+        openaiApiKey,
+        aiModel,
+        promptLimits,
+      );
+    } else {
+      await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    }
     return;
   }
 
@@ -1201,7 +1655,16 @@ async function main(): Promise<void> {
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffWorktree();
     logStep(`Requesting AI completion with model: ${aiModel}`);
-    await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    if (FORCE_TOOLS) {
+      await reviewDiffToConsoleWithToolsLocal(
+        diff,
+        openaiApiKey,
+        aiModel,
+        promptLimits,
+      );
+    } else {
+      await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    }
     return;
   }
 
@@ -1211,7 +1674,16 @@ async function main(): Promise<void> {
     const openaiApiKey = openaiEnvs["OPENAI_API_KEY"]!;
     const diff = await localDiffLastCommit();
     logStep(`Requesting AI completion with model: ${aiModel}`);
-    await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    if (FORCE_TOOLS) {
+      await reviewDiffToConsoleWithToolsLocal(
+        diff,
+        openaiApiKey,
+        aiModel,
+        promptLimits,
+      );
+    } else {
+      await reviewDiffToConsole(diff, openaiApiKey, aiModel, promptLimits);
+    }
     return;
   }
 
