@@ -14,21 +14,11 @@ import {
   hasDebugFlag,
   hasForceToolsFlag,
   hasIgnoredExtension,
-  hasModeFlag,
-  parseDiffFileFlag,
   parseIgnoreExtensions,
-  parseMode,
   parseNumberFlag,
   parsePromptLimits,
   requireEnvs,
 } from "./cli/args.js";
-import {
-  diffFromFile,
-  localDiffLastCommit,
-  localDiffWorktree,
-  reviewDiffToConsole,
-  reviewDiffToConsoleWithToolsLocal,
-} from "./cli/local-review.js";
 import { reviewMergeRequestMultiPass } from "./cli/ci-review.js";
 import {
   fetchMergeRequestChanges,
@@ -41,19 +31,10 @@ function printHelp(): void {
       "gitlab-ai-review",
       "",
       "Usage:",
-      "  gitlab-ai-review --ci",
-      "  gitlab-ai-review --worktree",
-      "  gitlab-ai-review --last-commit",
-      "  gitlab-ai-review --diff-file=./changes.diff",
+      "  gitlab-ai-review",
       "  gitlab-ai-review --help",
       "  gitlab-ai-review --debug",
-      "  gitlab-ai-review --ci --ignore-ext=md,lock",
-      "",
-      "Modes (choose one):",
-      "  --ci           Run in GitLab MR pipeline: fetch MR changes and post a new MR note.",
-      "  --worktree     Review local uncommitted changes (staged + unstaged) and print to stdout.",
-      "  --last-commit  Review last commit (HEAD) and print to stdout.",
-      "  --diff-file    Review git-diff content from a file and print to stdout.",
+      "  gitlab-ai-review --ignore-ext=md,lock",
       "",
       "Debug:",
       "  --debug        Print full error details (stack, API error fields).",
@@ -73,9 +54,6 @@ function printHelp(): void {
       "",
       "CI-only env vars (provided by GitLab):",
       "  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN (only if PROJECT_ACCESS_TOKEN is not set)",
-      "",
-      "Notes:",
-      "  - If no mode is specified, it defaults to --ci when CI_MERGE_REQUEST_IID is set, otherwise --worktree.",
       "",
     ].join("\n"),
   );
@@ -108,17 +86,14 @@ async function getCliVersion(): Promise<string> {
 }
 
 async function main(): Promise<void> {
+  const args = new Set(process.argv.slice(2));
+  if (args.has("--help") || args.has("-h")) {
+    printHelp();
+    return;
+  }
+
   const cliVersion = await getCliVersion();
   logStep(`gitlab-ai-review v${cliVersion}`);
-
-  const diffFilePath = parseDiffFileFlag(process.argv);
-  if (diffFilePath != null && hasModeFlag(process.argv)) {
-    throw new Error("Do not combine --diff-file with --ci/--worktree/--last-commit");
-  }
-  const mode =
-    diffFilePath != null
-      ? "worktree"
-      : parseMode(process.argv, printHelp, process.env.CI_MERGE_REQUEST_IID);
   const ignoredExtensions = parseIgnoreExtensions(process.argv);
   const promptLimits = parsePromptLimits(process.argv);
   const maxFindings = parseNumberFlag(
@@ -136,63 +111,6 @@ async function main(): Promise<void> {
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
 
   const loggers = { logStep, logDebug };
-
-  if (diffFilePath != null) {
-    logStep(`Reading diff file: ${diffFilePath}`);
-    const openaiApiKey = requireEnvs(["OPENAI_API_KEY"])["OPENAI_API_KEY"]!;
-    const diff = await diffFromFile(diffFilePath);
-    logStep(`Requesting AI completion with model: ${aiModel}`);
-    if (FORCE_TOOLS) {
-      await reviewDiffToConsoleWithToolsLocal({
-        diff,
-        openaiApiKey,
-        aiModel,
-        promptLimits,
-        forceTools: FORCE_TOOLS,
-        loggers,
-      });
-    } else {
-      await reviewDiffToConsole({
-        diff,
-        openaiApiKey,
-        aiModel,
-        promptLimits,
-        forceTools: FORCE_TOOLS,
-        loggers,
-      });
-    }
-    return;
-  }
-
-  if (mode === "worktree" || mode === "last-commit") {
-    logStep(mode === "worktree" ? "Collecting local changes" : "Collecting HEAD diff");
-    const openaiApiKey = requireEnvs(["OPENAI_API_KEY"])["OPENAI_API_KEY"]!;
-    const diff =
-      mode === "worktree"
-        ? await localDiffWorktree(process.argv)
-        : await localDiffLastCommit(process.argv);
-    logStep(`Requesting AI completion with model: ${aiModel}`);
-    if (FORCE_TOOLS) {
-      await reviewDiffToConsoleWithToolsLocal({
-        diff,
-        openaiApiKey,
-        aiModel,
-        promptLimits,
-        forceTools: FORCE_TOOLS,
-        loggers,
-      });
-    } else {
-      await reviewDiffToConsole({
-        diff,
-        openaiApiKey,
-        aiModel,
-        promptLimits,
-        forceTools: FORCE_TOOLS,
-        loggers,
-      });
-    }
-    return;
-  }
 
   const projectAccessToken =
     envOrUndefined("PROJECT_ACCESS_TOKEN") ?? envOrUndefined("GITLAB_TOKEN");
@@ -230,7 +148,9 @@ async function main(): Promise<void> {
   );
 
   if (filteredChanges.length === 0) {
-    process.stdout.write("No changes found in merge request. Skipping review.\n");
+    process.stdout.write(
+      "No changes found in merge request. Skipping review.\n",
+    );
     return;
   }
 
