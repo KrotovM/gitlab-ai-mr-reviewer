@@ -7,9 +7,17 @@ import type { ChatCompletionMessageParam } from "openai/resources/index.js";
 import { readFile } from "node:fs/promises";
 import {
   buildAnswer,
+  buildConsolidatePrompt,
+  buildFileReviewPrompt,
   buildPrompt,
+  buildTriagePrompt,
+  DEFAULT_MAX_FINDINGS,
   DEFAULT_PROMPT_LIMITS,
+  DEFAULT_REVIEW_CONCURRENCY,
+  extractCompletionText,
+  parseTriageResponse,
   type PromptLimits,
+  type TriageFileInput,
 } from "./prompt/index.js";
 import {
   fetchFileAtRef,
@@ -46,6 +54,8 @@ function printHelp(): void {
       "  --max-diffs=50",
       "  --max-diff-chars=16000",
       "  --max-total-prompt-chars=220000",
+      "  --max-findings=5          Max findings in final review (CI multi-pass only).",
+      "  --max-review-concurrency=5  Parallel per-file review calls (CI multi-pass only).",
       "",
       "Env vars:",
       "  OPENAI_API_KEY (required)  OpenAI API key.",
@@ -722,6 +732,431 @@ async function reviewMergeRequestWithTools(params: {
   return buildAnswer(finalCompletion);
 }
 
+// ---------------------------------------------------------------------------
+// Multi-pass pipeline: triage → per-file review → consolidate
+// ---------------------------------------------------------------------------
+
+const MAX_FILE_TOOL_ROUNDS = 5;
+
+async function runFileReviewWithTools(params: {
+  openaiInstance: OpenAI;
+  aiModel: ChatModel;
+  filePath: string;
+  fileDiff: string;
+  summary: string;
+  otherChangedFiles: string[];
+  refs: { base: string; head: string };
+  gitLabProjectApiUrl: URL;
+  projectId: string;
+  headers: Record<string, string>;
+}): Promise<string> {
+  const {
+    openaiInstance,
+    aiModel,
+    filePath,
+    fileDiff,
+    summary,
+    otherChangedFiles,
+    refs,
+    gitLabProjectApiUrl,
+    projectId,
+    headers,
+  } = params;
+
+  const messages: ChatCompletionMessageParam[] = buildFileReviewPrompt({
+    filePath,
+    fileDiff,
+    summary,
+    otherChangedFiles,
+    allowTools: true,
+  });
+
+  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GET_FILE,
+        description:
+          "Fetch raw file content at a specific git ref for review context.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string", description: "Repository file path." },
+            ref: {
+              type: "string",
+              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
+            },
+          },
+          required: ["path", "ref"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GREP,
+        description:
+          "Search the repository for a keyword or pattern. Returns up to 10 matching code fragments with file paths and line numbers.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: {
+              type: "string",
+              description:
+                "Search string (keyword, function name, variable, etc.).",
+            },
+            ref: {
+              type: "string",
+              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
+
+  for (let round = 0; round < MAX_FILE_TOOL_ROUNDS; round += 1) {
+    const completion = await openaiInstance.chat.completions.create({
+      model: aiModel,
+      temperature: 0.2,
+      stream: false,
+      messages,
+      tools,
+      tool_choice: "auto",
+    });
+    const msg = completion.choices[0]?.message;
+    if (msg == null) return extractCompletionText(completion) ?? "No issues found.";
+
+    const toolCalls = msg.tool_calls ?? [];
+    if (toolCalls.length === 0)
+      return extractCompletionText(completion) ?? "No issues found.";
+
+    messages.push({
+      role: "assistant",
+      content: msg.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const toolCall of toolCalls) {
+      const argsRaw = toolCall.function.arguments ?? "{}";
+      let toolContent: string;
+
+      if (toolCall.function.name === TOOL_NAME_GET_FILE) {
+        toolContent = await handleGetFileTool(
+          argsRaw,
+          gitLabProjectApiUrl,
+          headers,
+        );
+      } else if (toolCall.function.name === TOOL_NAME_GREP) {
+        toolContent = await handleGrepTool(
+          argsRaw,
+          refs.head,
+          gitLabProjectApiUrl,
+          headers,
+          projectId,
+        );
+      } else {
+        toolContent = JSON.stringify({
+          ok: false,
+          error: `Unknown tool "${toolCall.function.name}"`,
+        });
+      }
+
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: toolContent,
+      });
+    }
+  }
+
+  messages.push({
+    role: "user",
+    content:
+      "Tool-call limit reached. Provide your final review now without any tool calls.",
+  });
+  const final = await openaiInstance.chat.completions.create({
+    model: aiModel,
+    temperature: 0.2,
+    stream: false,
+    messages,
+  });
+  return extractCompletionText(final) ?? "No issues found.";
+}
+
+async function handleGetFileTool(
+  argsRaw: string,
+  gitLabProjectApiUrl: URL,
+  headers: Record<string, string>,
+): Promise<string> {
+  try {
+    const parsed = JSON.parse(argsRaw) as { path?: string; ref?: string };
+    const path = parsed.path?.trim();
+    const ref = parsed.ref?.trim();
+    if (!path || !ref) {
+      return JSON.stringify({
+        ok: false,
+        error: "Both path and ref are required.",
+      });
+    }
+    const fileText = await fetchFileAtRef({
+      gitLabBaseUrl: gitLabProjectApiUrl,
+      headers,
+      filePath: path,
+      ref,
+    });
+    if (fileText instanceof Error) {
+      return JSON.stringify({
+        ok: false,
+        path,
+        ref,
+        error: fileText.message,
+      });
+    }
+    return JSON.stringify({
+      ok: true,
+      path,
+      ref,
+      content: fileText.slice(0, 30000),
+      truncated: fileText.length > 30000,
+    });
+  } catch (error: any) {
+    return JSON.stringify({
+      ok: false,
+      error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
+      raw: argsRaw,
+    });
+  }
+}
+
+async function handleGrepTool(
+  argsRaw: string,
+  defaultRef: string,
+  gitLabProjectApiUrl: URL,
+  headers: Record<string, string>,
+  projectId: string,
+): Promise<string> {
+  try {
+    const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
+    const query = parsed.query?.trim();
+    if (!query) {
+      return JSON.stringify({ ok: false, error: "query is required." });
+    }
+    const ref = parsed.ref?.trim() || defaultRef;
+    const results = await searchRepository({
+      gitLabBaseUrl: gitLabProjectApiUrl,
+      headers,
+      query,
+      ref,
+      projectId,
+    });
+    if (results instanceof Error) {
+      return JSON.stringify({
+        ok: false,
+        query,
+        ref,
+        error: results.message,
+      });
+    }
+    const trimmed = results.map((r) => ({
+      path: r.path,
+      startline: r.startline,
+      data: r.data.slice(0, 2000),
+    }));
+    return JSON.stringify({ ok: true, query, ref, matches: trimmed });
+  } catch (error: any) {
+    return JSON.stringify({
+      ok: false,
+      error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
+      raw: argsRaw,
+    });
+  }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const idx = nextIndex;
+      nextIndex += 1;
+      results[idx] = await fn(items[idx]!);
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+async function reviewMergeRequestMultiPass(params: {
+  openaiInstance: OpenAI;
+  aiModel: ChatModel;
+  promptLimits: PromptLimits;
+  changes: MergeRequestChange[];
+  refs: { base: string; head: string };
+  gitLabProjectApiUrl: URL;
+  projectId: string;
+  headers: Record<string, string>;
+  maxFindings: number;
+  reviewConcurrency: number;
+}): Promise<string> {
+  const {
+    openaiInstance,
+    aiModel,
+    promptLimits,
+    changes,
+    refs,
+    gitLabProjectApiUrl,
+    projectId,
+    headers,
+    maxFindings,
+    reviewConcurrency,
+  } = params;
+
+  // --- Pass 1: Triage + Summary ---
+  logStep(
+    `Pass 1/3: triaging ${changes.length} file(s)`,
+  );
+
+  const triageInputs: TriageFileInput[] = changes.map((c) => ({
+    path: c.new_path,
+    new_file: c.new_file,
+    deleted_file: c.deleted_file,
+    renamed_file: c.renamed_file,
+    diff: c.diff,
+  }));
+
+  const triageMessages = buildTriagePrompt(triageInputs);
+  let triageResult: ReturnType<typeof parseTriageResponse> = null;
+
+  try {
+    const triageCompletion = await openaiInstance.chat.completions.create({
+      model: aiModel,
+      temperature: 0.1,
+      stream: false,
+      messages: triageMessages,
+      response_format: { type: "json_object" },
+    });
+    const triageText = extractCompletionText(triageCompletion);
+    if (triageText != null) {
+      triageResult = parseTriageResponse(triageText);
+    }
+  } catch (error: any) {
+    logStep(`Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`);
+  }
+
+  if (triageResult == null) {
+    logStep("Triage parse failed. Falling back to single-pass pipeline.");
+    return await reviewMergeRequestWithTools({
+      openaiInstance,
+      aiModel,
+      promptLimits,
+      changes,
+      refs,
+      gitLabProjectApiUrl,
+      projectId,
+      headers,
+    });
+  }
+
+  const triageMap = new Map(
+    triageResult.files.map((f) => [f.path, f.verdict]),
+  );
+  const reviewFiles = changes.filter(
+    (c) => triageMap.get(c.new_path) !== "SKIP",
+  );
+  const skippedCount = changes.length - reviewFiles.length;
+
+  logStep(
+    `Triage: ${reviewFiles.length} file(s) to review, ${skippedCount} skipped. Summary: ${triageResult.summary.slice(0, 120)}...`,
+  );
+
+  if (reviewFiles.length === 0) {
+    const DISCLAIMER =
+      "This comment was generated by an artificial intelligence duck.";
+    return `No confirmed bugs or high-value optimizations found.\n\n---\n_${DISCLAIMER}_`;
+  }
+
+  // --- Pass 2: Per-file review (parallel with concurrency limit) ---
+  logStep(
+    `Pass 2/3: reviewing ${reviewFiles.length} file(s) (concurrency=${reviewConcurrency})`,
+  );
+
+  const allChangedPaths = changes.map((c) => c.new_path);
+
+  const perFileFindings = await mapWithConcurrency(
+    reviewFiles,
+    reviewConcurrency,
+    async (change) => {
+      const otherFiles = allChangedPaths.filter((p) => p !== change.new_path);
+      const findings = await runFileReviewWithTools({
+        openaiInstance,
+        aiModel,
+        filePath: change.new_path,
+        fileDiff: change.diff,
+        summary: triageResult!.summary,
+        otherChangedFiles: otherFiles,
+        refs,
+        gitLabProjectApiUrl,
+        projectId,
+        headers,
+      });
+      return { path: change.new_path, findings };
+    },
+  );
+
+  // --- Pass 3: Consolidate ---
+  logStep("Pass 3/3: consolidating findings");
+
+  const consolidateMessages = buildConsolidatePrompt({
+    perFileFindings,
+    summary: triageResult.summary,
+    maxFindings,
+  });
+
+  if (consolidateMessages == null) {
+    const DISCLAIMER =
+      "This comment was generated by an artificial intelligence duck.";
+    return `No confirmed bugs or high-value optimizations found.\n\n---\n_${DISCLAIMER}_`;
+  }
+
+  try {
+    const consolidateCompletion =
+      await openaiInstance.chat.completions.create({
+        model: aiModel,
+        temperature: 0.1,
+        stream: false,
+        messages: consolidateMessages,
+      });
+    return buildAnswer(consolidateCompletion);
+  } catch (error: any) {
+    logStep(`Consolidation failed: ${error?.message ?? error}. Returning raw per-file findings.`);
+    const DISCLAIMER =
+      "This comment was generated by an artificial intelligence duck.";
+    const raw = perFileFindings
+      .filter(
+        (f) =>
+          !f.findings.includes("No issues found.") &&
+          !f.findings.includes("No confirmed bugs"),
+      )
+      .map((f) => f.findings)
+      .join("\n");
+    return `${raw || "No confirmed bugs or high-value optimizations found."}\n\n---\n_${DISCLAIMER}_`;
+  }
+}
+
 async function main(): Promise<void> {
   const cliVersion = await getCliVersion();
   logStep(`gitlab-ai-review v${cliVersion}`);
@@ -735,6 +1170,18 @@ async function main(): Promise<void> {
   const mode = diffFilePath != null ? "worktree" : parseMode(process.argv);
   const ignoredExtensions = parseIgnoreExtensions(process.argv);
   const promptLimits = parsePromptLimits(process.argv);
+  const maxFindings = parseNumberFlag(
+    process.argv,
+    "max-findings",
+    DEFAULT_MAX_FINDINGS,
+    1,
+  );
+  const reviewConcurrency = parseNumberFlag(
+    process.argv,
+    "max-review-concurrency",
+    DEFAULT_REVIEW_CONCURRENCY,
+    1,
+  );
 
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
 
@@ -821,9 +1268,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  logStep(`Requesting AI completion with model: ${aiModel}`);
+  logStep(`Requesting AI review with model: ${aiModel} (multi-pass pipeline)`);
   const openaiInstance = new OpenAI({ apiKey: openaiApiKey });
-  const answer = await reviewMergeRequestWithTools({
+  const answer = await reviewMergeRequestMultiPass({
     openaiInstance,
     aiModel,
     promptLimits,
@@ -835,6 +1282,8 @@ async function main(): Promise<void> {
     gitLabProjectApiUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
     projectId,
     headers,
+    maxFindings,
+    reviewConcurrency,
   });
 
   logStep("Posting AI review note to merge request");
