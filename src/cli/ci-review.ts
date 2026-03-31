@@ -4,7 +4,6 @@ import OpenAI from "openai";
 import type { ChatModel } from "openai/resources/index.mjs";
 import type { ChatCompletionMessageParam } from "openai/resources/index.js";
 import {
-  AI_MAX_OUTPUT_TOKENS,
   buildAnswer,
   buildConsolidatePrompt,
   buildFileReviewPrompt,
@@ -313,7 +312,6 @@ export async function reviewMergeRequestWithTools(params: {
   const finalCompletion = await openaiInstance.chat.completions.create({
     model: aiModel,
     temperature: 0.2,
-    max_tokens: AI_MAX_OUTPUT_TOKENS,
     stream: false,
     messages,
   });
@@ -466,7 +464,6 @@ async function runFileReviewWithTools(params: {
   const final = await openaiInstance.chat.completions.create({
     model: aiModel,
     temperature: 0.2,
-    max_tokens: AI_MAX_OUTPUT_TOKENS,
     stream: false,
     messages,
   });
@@ -595,7 +592,6 @@ export async function reviewMergeRequestMultiPass(params: {
     const consolidateCompletion = await openaiInstance.chat.completions.create({
       model: aiModel,
       temperature: 0.1,
-      max_tokens: AI_MAX_OUTPUT_TOKENS,
       stream: false,
       messages: consolidateMessages,
     });
@@ -615,7 +611,6 @@ export async function reviewMergeRequestMultiPass(params: {
       const verificationCompletion = await openaiInstance.chat.completions.create({
         model: aiModel,
         temperature: 0.0,
-        max_tokens: AI_MAX_OUTPUT_TOKENS,
         stream: false,
         messages: verificationMessages,
       });

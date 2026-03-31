@@ -9,7 +9,11 @@ import {
   FILE_REVIEW_SYSTEM,
   TRIAGE_SYSTEM,
 } from "./messages.js";
-import { sanitizeGitLabMarkdown, truncateWithMarker } from "./utils.js";
+import {
+  normalizeReviewFindingsMarkdown,
+  sanitizeGitLabMarkdown,
+  truncateWithMarker,
+} from "./utils.js";
 
 export interface PromptLimits {
   maxDiffs: number;
@@ -381,6 +385,7 @@ export const buildAnswer = (
   if (content === "") {
     return `${ERROR_ANSWER}\n\nError: Model returned an empty response body. Try another model (for example, gpt-4o-mini) or a different provider endpoint.\n\n---\n_${DISCLAIMER}_`;
   }
-  const safe = sanitizeGitLabMarkdown(content);
+  const normalizedFindings = normalizeReviewFindingsMarkdown(content);
+  const safe = sanitizeGitLabMarkdown(normalizedFindings);
   return `${safe}\n\n---\n_${DISCLAIMER}_`;
 };
