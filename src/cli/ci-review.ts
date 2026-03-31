@@ -2,7 +2,7 @@
 
 import OpenAI from "openai";
 import type { ChatModel } from "openai/resources/index.mjs";
-import type { ChatCompletionMessageParam } from "openai/resources/index.js";
+import type { ChatCompletionMessageParam } from "openai/resources/index.mjs";
 import {
   buildAnswer,
   buildConsolidatePrompt,
@@ -32,6 +32,65 @@ type LoggerFns = {
   logStep: (message: string) => void;
   logDebug: (message: string) => void;
 };
+type DebugRecordWriter = (record: Record<string, unknown>) => Promise<void> | void;
+
+async function appendDebugDump(
+  _debugDumpFile: string | undefined,
+  debugRecordWriter: DebugRecordWriter | undefined,
+  record: Record<string, unknown>,
+): Promise<void> {
+  const withTs = { ts: new Date().toISOString(), ...record };
+  if (debugRecordWriter != null) {
+    await debugRecordWriter(withTs);
+  }
+}
+
+async function createCompletionWithDebug(params: {
+  openaiInstance: OpenAI;
+  requestLabel: string;
+  request: any;
+  debugDumpFile?: string;
+  debugRecordWriter?: DebugRecordWriter;
+}): Promise<any> {
+  const { openaiInstance, requestLabel, request, debugDumpFile, debugRecordWriter } =
+    params;
+  await appendDebugDump(debugDumpFile, debugRecordWriter, {
+    kind: "openai_request",
+    label: requestLabel,
+    request,
+  });
+  try {
+    const completion = await openaiInstance.chat.completions.create(request);
+    await appendDebugDump(debugDumpFile, debugRecordWriter, {
+      kind: "openai_response",
+      label: requestLabel,
+      response: {
+        id: completion.id,
+        model: completion.model,
+        usage: (completion as any).usage,
+        choices: completion.choices.map((c: any) => ({
+          index: c.index,
+          finish_reason: c.finish_reason,
+          message: c.message,
+        })),
+      },
+    });
+    return completion;
+  } catch (error: any) {
+    await appendDebugDump(debugDumpFile, debugRecordWriter, {
+      kind: "openai_error",
+      label: requestLabel,
+      error: {
+        name: error?.name,
+        message: error?.message,
+        code: error?.code,
+        status: error?.status,
+        type: error?.type,
+      },
+    });
+    throw error;
+  }
+}
 
 function buildReviewMetadata(
   changes: MergeRequestChange[],
@@ -71,7 +130,10 @@ async function handleGetFileTool(
     const path = parsed.path?.trim();
     const ref = parsed.ref?.trim();
     if (!path || !ref) {
-      return JSON.stringify({ ok: false, error: "Both path and ref are required." });
+      return JSON.stringify({
+        ok: false,
+        error: "Both path and ref are required.",
+      });
     }
     const fileText = await fetchFileAtRef({
       gitLabBaseUrl: gitLabProjectApiUrl,
@@ -113,7 +175,8 @@ async function handleGrepTool(
   try {
     const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
     const query = parsed.query?.trim();
-    if (!query) return JSON.stringify({ ok: false, error: "query is required." });
+    if (!query)
+      return JSON.stringify({ ok: false, error: "query is required." });
     const ref = parsed.ref?.trim() || defaultRef;
     const results = await searchRepository({
       gitLabBaseUrl: gitLabProjectApiUrl,
@@ -180,6 +243,8 @@ export async function reviewMergeRequestWithTools(params: {
   headers: Record<string, string>;
   forceTools: boolean;
   loggers: LoggerFns;
+  debugDumpFile?: string;
+  debugRecordWriter?: DebugRecordWriter;
 }): Promise<string> {
   const {
     openaiInstance,
@@ -192,6 +257,8 @@ export async function reviewMergeRequestWithTools(params: {
     headers,
     forceTools,
     loggers,
+    debugDumpFile,
+    debugRecordWriter,
   } = params;
   const { logDebug, logStep } = loggers;
 
@@ -210,7 +277,8 @@ export async function reviewMergeRequestWithTools(params: {
       type: "function",
       function: {
         name: TOOL_NAME_GET_FILE,
-        description: "Fetch raw file content at a specific git ref for review context.",
+        description:
+          "Fetch raw file content at a specific git ref for review context.",
         parameters: {
           type: "object",
           additionalProperties: false,
@@ -237,7 +305,8 @@ export async function reviewMergeRequestWithTools(params: {
           properties: {
             query: {
               type: "string",
-              description: "Search string (keyword, function name, variable, etc.).",
+              description:
+                "Search string (keyword, function name, variable, etc.).",
             },
             ref: {
               type: "string",
@@ -251,13 +320,19 @@ export async function reviewMergeRequestWithTools(params: {
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    const completion = await openaiInstance.chat.completions.create({
-      model: aiModel,
-      temperature: 0.2,
-      stream: false,
-      messages,
-      tools,
-      tool_choice: forceTools && round === 0 ? "required" : "auto",
+    const completion = await createCompletionWithDebug({
+      openaiInstance,
+      requestLabel: `main_review_round_${round + 1}`,
+      debugDumpFile,
+      debugRecordWriter,
+      request: {
+        model: aiModel,
+        temperature: 0.2,
+        stream: false,
+        messages,
+        tools,
+        tool_choice: forceTools && round === 0 ? "required" : "auto",
+      },
     });
     const message = completion.choices[0]?.message;
     if (message == null) return buildAnswer(completion);
@@ -275,12 +350,26 @@ export async function reviewMergeRequestWithTools(params: {
     });
 
     for (const toolCall of toolCalls) {
+      if (toolCall.type !== "function") continue;
+      const toolName = toolCall.function.name;
       const argsRaw = toolCall.function.arguments ?? "{}";
-      logToolUsageMinimal(logStep, toolCall.function.name, argsRaw);
+      await appendDebugDump(debugDumpFile, debugRecordWriter, {
+        kind: "tool_call",
+        phase: "main_review",
+        round: round + 1,
+        id: toolCall.id,
+        name: toolName,
+        arguments: argsRaw,
+      });
+      logToolUsageMinimal(logStep, toolName, argsRaw);
       let toolContent: string;
-      if (toolCall.function.name === TOOL_NAME_GET_FILE) {
-        toolContent = await handleGetFileTool(argsRaw, gitLabProjectApiUrl, headers);
-      } else if (toolCall.function.name === TOOL_NAME_GREP) {
+      if (toolName === TOOL_NAME_GET_FILE) {
+        toolContent = await handleGetFileTool(
+          argsRaw,
+          gitLabProjectApiUrl,
+          headers,
+        );
+      } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
           argsRaw,
           refs.head,
@@ -291,7 +380,7 @@ export async function reviewMergeRequestWithTools(params: {
       } else {
         toolContent = JSON.stringify({
           ok: false,
-          error: `Unknown tool "${toolCall.function.name}"`,
+          error: `Unknown tool "${toolName}"`,
         });
       }
       messages.push({
@@ -299,8 +388,16 @@ export async function reviewMergeRequestWithTools(params: {
         tool_call_id: toolCall.id,
         content: toolContent,
       });
+      await appendDebugDump(debugDumpFile, debugRecordWriter, {
+        kind: "tool_response",
+        phase: "main_review",
+        round: round + 1,
+        id: toolCall.id,
+        name: toolName,
+        content: toolContent,
+      });
       logDebug(
-        `tool response id=${toolCall.id} name=${toolCall.function.name} payload=${toolContent.slice(0, 300)}`,
+        `tool response id=${toolCall.id} name=${toolName} payload=${toolContent.slice(0, 300)}`,
       );
     }
   }
@@ -309,11 +406,17 @@ export async function reviewMergeRequestWithTools(params: {
     role: "user",
     content: `Tool-call limit reached (${MAX_TOOL_ROUNDS}). Do not call any tools. Provide your best-effort final review now, strictly following the required output format. If confidence is low, return the exact no-issues sentence.`,
   });
-  const finalCompletion = await openaiInstance.chat.completions.create({
-    model: aiModel,
-    temperature: 0.2,
-    stream: false,
-    messages,
+  const finalCompletion = await createCompletionWithDebug({
+    openaiInstance,
+    requestLabel: "main_review_final_after_tool_limit",
+    debugDumpFile,
+    debugRecordWriter,
+    request: {
+      model: aiModel,
+      temperature: 0.2,
+      stream: false,
+      messages,
+    },
   });
   return buildAnswer(finalCompletion);
 }
@@ -331,6 +434,8 @@ async function runFileReviewWithTools(params: {
   headers: Record<string, string>;
   forceTools: boolean;
   loggers: LoggerFns;
+  debugDumpFile?: string;
+  debugRecordWriter?: DebugRecordWriter;
 }): Promise<string> {
   const {
     openaiInstance,
@@ -345,6 +450,8 @@ async function runFileReviewWithTools(params: {
     headers,
     forceTools,
     loggers,
+    debugDumpFile,
+    debugRecordWriter,
   } = params;
   const { logDebug, logStep } = loggers;
 
@@ -361,7 +468,8 @@ async function runFileReviewWithTools(params: {
       type: "function",
       function: {
         name: TOOL_NAME_GET_FILE,
-        description: "Fetch raw file content at a specific git ref for review context.",
+        description:
+          "Fetch raw file content at a specific git ref for review context.",
         parameters: {
           type: "object",
           additionalProperties: false,
@@ -388,7 +496,8 @@ async function runFileReviewWithTools(params: {
           properties: {
             query: {
               type: "string",
-              description: "Search string (keyword, function name, variable, etc.).",
+              description:
+                "Search string (keyword, function name, variable, etc.).",
             },
             ref: {
               type: "string",
@@ -402,16 +511,23 @@ async function runFileReviewWithTools(params: {
   ];
 
   for (let round = 0; round < MAX_FILE_TOOL_ROUNDS; round += 1) {
-    const completion = await openaiInstance.chat.completions.create({
-      model: aiModel,
-      temperature: 0.2,
-      stream: false,
-      messages,
-      tools,
-      tool_choice: forceTools && round === 0 ? "required" : "auto",
+    const completion = await createCompletionWithDebug({
+      openaiInstance,
+      requestLabel: `file_review_${filePath}_round_${round + 1}`,
+      debugDumpFile,
+      debugRecordWriter,
+      request: {
+        model: aiModel,
+        temperature: 0.2,
+        stream: false,
+        messages,
+        tools,
+        tool_choice: forceTools && round === 0 ? "required" : "auto",
+      },
     });
     const msg = completion.choices[0]?.message;
-    if (msg == null) return extractCompletionText(completion) ?? "No issues found.";
+    if (msg == null)
+      return extractCompletionText(completion) ?? "No issues found.";
 
     const toolCalls = msg.tool_calls ?? [];
     logDebug(
@@ -427,12 +543,27 @@ async function runFileReviewWithTools(params: {
     });
 
     for (const toolCall of toolCalls) {
+      if (toolCall.type !== "function") continue;
+      const toolName = toolCall.function.name;
       const argsRaw = toolCall.function.arguments ?? "{}";
-      logToolUsageMinimal(logStep, toolCall.function.name, argsRaw, filePath);
+      await appendDebugDump(debugDumpFile, debugRecordWriter, {
+        kind: "tool_call",
+        phase: "file_review",
+        filePath,
+        round: round + 1,
+        id: toolCall.id,
+        name: toolName,
+        arguments: argsRaw,
+      });
+      logToolUsageMinimal(logStep, toolName, argsRaw, filePath);
       let toolContent: string;
-      if (toolCall.function.name === TOOL_NAME_GET_FILE) {
-        toolContent = await handleGetFileTool(argsRaw, gitLabProjectApiUrl, headers);
-      } else if (toolCall.function.name === TOOL_NAME_GREP) {
+      if (toolName === TOOL_NAME_GET_FILE) {
+        toolContent = await handleGetFileTool(
+          argsRaw,
+          gitLabProjectApiUrl,
+          headers,
+        );
+      } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
           argsRaw,
           refs.head,
@@ -443,7 +574,7 @@ async function runFileReviewWithTools(params: {
       } else {
         toolContent = JSON.stringify({
           ok: false,
-          error: `Unknown tool "${toolCall.function.name}"`,
+          error: `Unknown tool "${toolName}"`,
         });
       }
       messages.push({
@@ -451,21 +582,37 @@ async function runFileReviewWithTools(params: {
         tool_call_id: toolCall.id,
         content: toolContent,
       });
+      await appendDebugDump(debugDumpFile, debugRecordWriter, {
+        kind: "tool_response",
+        phase: "file_review",
+        filePath,
+        round: round + 1,
+        id: toolCall.id,
+        name: toolName,
+        content: toolContent,
+      });
       logDebug(
-        `tool response file=${filePath} id=${toolCall.id} name=${toolCall.function.name} payload=${toolContent.slice(0, 300)}`,
+        `tool response file=${filePath} id=${toolCall.id} name=${toolName} payload=${toolContent.slice(0, 300)}`,
       );
     }
   }
 
   messages.push({
     role: "user",
-    content: "Tool-call limit reached. Provide your final review now without any tool calls.",
+    content:
+      "Tool-call limit reached. Provide your final review now without any tool calls.",
   });
-  const final = await openaiInstance.chat.completions.create({
-    model: aiModel,
-    temperature: 0.2,
-    stream: false,
-    messages,
+  const final = await createCompletionWithDebug({
+    openaiInstance,
+    requestLabel: `file_review_${filePath}_final_after_tool_limit`,
+    debugDumpFile,
+    debugRecordWriter,
+    request: {
+      model: aiModel,
+      temperature: 0.2,
+      stream: false,
+      messages,
+    },
   });
   return extractCompletionText(final) ?? "No issues found.";
 }
@@ -483,6 +630,8 @@ export async function reviewMergeRequestMultiPass(params: {
   reviewConcurrency: number;
   forceTools: boolean;
   loggers: LoggerFns;
+  debugDumpFile?: string;
+  debugRecordWriter?: DebugRecordWriter;
 }): Promise<string> {
   const {
     openaiInstance,
@@ -497,6 +646,8 @@ export async function reviewMergeRequestMultiPass(params: {
     reviewConcurrency,
     forceTools,
     loggers,
+    debugDumpFile,
+    debugRecordWriter,
   } = params;
   const { logStep } = loggers;
 
@@ -511,17 +662,25 @@ export async function reviewMergeRequestMultiPass(params: {
   const triageMessages = buildTriagePrompt(triageInputs);
   let triageResult: ReturnType<typeof parseTriageResponse> = null;
   try {
-    const triageCompletion = await openaiInstance.chat.completions.create({
-      model: aiModel,
-      temperature: 0.1,
-      stream: false,
-      messages: triageMessages,
-      response_format: { type: "json_object" },
+    const triageCompletion = await createCompletionWithDebug({
+      openaiInstance,
+      requestLabel: "triage_pass",
+      debugDumpFile,
+      debugRecordWriter,
+      request: {
+        model: aiModel,
+        temperature: 0.1,
+        stream: false,
+        messages: triageMessages,
+        response_format: { type: "json_object" },
+      },
     });
     const triageText = extractCompletionText(triageCompletion);
     if (triageText != null) triageResult = parseTriageResponse(triageText);
   } catch (error: any) {
-    logStep(`Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`);
+    logStep(
+      `Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`,
+    );
   }
 
   if (triageResult == null) {
@@ -537,11 +696,15 @@ export async function reviewMergeRequestMultiPass(params: {
       headers,
       forceTools,
       loggers,
+      debugDumpFile,
+      debugRecordWriter,
     });
   }
 
   const triageMap = new Map(triageResult.files.map((f) => [f.path, f.verdict]));
-  const reviewFiles = changes.filter((c) => triageMap.get(c.new_path) !== "SKIP");
+  const reviewFiles = changes.filter(
+    (c) => triageMap.get(c.new_path) !== "SKIP",
+  );
   const skippedCount = changes.length - reviewFiles.length;
   logStep(
     `Triage: ${reviewFiles.length} file(s) to review, ${skippedCount} skipped. Summary: ${triageResult.summary.slice(0, 120)}...`,
@@ -573,6 +736,8 @@ export async function reviewMergeRequestMultiPass(params: {
         headers,
         forceTools,
         loggers,
+        debugDumpFile,
+        debugRecordWriter,
       });
       return { path: change.new_path, findings };
     },
@@ -589,11 +754,17 @@ export async function reviewMergeRequestMultiPass(params: {
     return `No confirmed bugs or high-value optimizations found.\n\n---\n_${DISCLAIMER}_`;
   }
   try {
-    const consolidateCompletion = await openaiInstance.chat.completions.create({
-      model: aiModel,
-      temperature: 0.1,
-      stream: false,
-      messages: consolidateMessages,
+    const consolidateCompletion = await createCompletionWithDebug({
+      openaiInstance,
+      requestLabel: "consolidate_pass",
+      debugDumpFile,
+      debugRecordWriter,
+      request: {
+        model: aiModel,
+        temperature: 0.1,
+        stream: false,
+        messages: consolidateMessages,
+      },
     });
     const consolidatedText = extractCompletionText(consolidateCompletion);
     if (consolidatedText == null || consolidatedText.trim() === "") {
@@ -608,11 +779,17 @@ export async function reviewMergeRequestMultiPass(params: {
       maxFindings,
     });
     try {
-      const verificationCompletion = await openaiInstance.chat.completions.create({
-        model: aiModel,
-        temperature: 0.0,
-        stream: false,
-        messages: verificationMessages,
+      const verificationCompletion = await createCompletionWithDebug({
+        openaiInstance,
+        requestLabel: "verification_pass",
+        debugDumpFile,
+        debugRecordWriter,
+        request: {
+          model: aiModel,
+          temperature: 0.0,
+          stream: false,
+          messages: verificationMessages,
+        },
       });
       return buildAnswer(verificationCompletion);
     } catch (error: any) {
@@ -622,7 +799,9 @@ export async function reviewMergeRequestMultiPass(params: {
       return buildAnswer(consolidateCompletion);
     }
   } catch (error: any) {
-    logStep(`Consolidation failed: ${error?.message ?? error}. Returning raw per-file findings.`);
+    logStep(
+      `Consolidation failed: ${error?.message ?? error}. Returning raw per-file findings.`,
+    );
     const DISCLAIMER = "This comment was generated by AI review bot.";
     const raw = perFileFindings
       .filter(
@@ -635,4 +814,3 @@ export async function reviewMergeRequestMultiPass(params: {
     return `${raw || "No confirmed bugs or high-value optimizations found."}\n\n---\n_${DISCLAIMER}_`;
   }
 }
-

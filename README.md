@@ -39,6 +39,7 @@ Set these in your project/group CI settings:
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
 - `PROJECT_ACCESS_TOKEN` (optional for public projects, but required for most private projects; token with `api` scope)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
+- `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `.ai-review-debug.html`; used with `--include-artifacts`)
 
 `OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
 
@@ -58,6 +59,7 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--max-findings=5` - Max findings in the final review (CI multi-pass only).
 - `--max-review-concurrency=5` - Parallel per-file review API calls (CI multi-pass only).
 - `--debug` - Print full error details (stack and API error fields).
+- `--include-artifacts` - Generate a local HTML debug artifact with per-pass outputs/tokens.
 - `--help` - Show help output.
 
 ## Architecture
