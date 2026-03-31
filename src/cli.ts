@@ -13,6 +13,7 @@ import {
   envOrUndefined,
   hasDebugFlag,
   hasForceToolsFlag,
+  hasIncludeArtifactsFlag,
   hasIgnoredExtension,
   parseIgnoreExtensions,
   parseNumberFlag,
@@ -24,6 +25,7 @@ import {
   fetchMergeRequestChanges,
   postMergeRequestNote,
 } from "./gitlab/services.js";
+import { renderDebugArtifactsHtml } from "./cli/debug-artifacts-html.js";
 
 function printHelp(): void {
   process.stdout.write(
@@ -38,6 +40,7 @@ function printHelp(): void {
       "",
       "Debug:",
       "  --debug        Print full error details (stack, API error fields).",
+      "  --include-artifacts  Generate local HTML artifact without printing payloads to console.",
       "  --force-tools  Force at least one tool-call round in tool-enabled review paths.",
       "  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock",
       "  --max-diffs=50",
@@ -61,6 +64,7 @@ function printHelp(): void {
 
 const DEBUG_MODE = hasDebugFlag(process.argv);
 const FORCE_TOOLS = hasForceToolsFlag(process.argv);
+const INCLUDE_ARTIFACTS = hasIncludeArtifactsFlag(process.argv);
 
 function logStep(message: string): void {
   process.stdout.write(`${message}\n`);
@@ -109,6 +113,15 @@ async function main(): Promise<void> {
     1,
   );
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
+  const artifactHtmlFile = INCLUDE_ARTIFACTS
+    ? envOrDefault("AI_REVIEW_ARTIFACT_HTML_FILE", ".ai-review-debug.html")
+    : undefined;
+  const artifactRecords: Record<string, any>[] = [];
+  const debugRecordWriter = INCLUDE_ARTIFACTS
+    ? async (record: Record<string, unknown>) => {
+        artifactRecords.push(record as Record<string, any>);
+      }
+    : undefined;
 
   const loggers = { logStep, logDebug };
 
@@ -171,6 +184,7 @@ async function main(): Promise<void> {
     reviewConcurrency,
     forceTools: FORCE_TOOLS,
     loggers,
+    debugRecordWriter,
   });
 
   logStep("Posting AI review note to merge request");
@@ -183,6 +197,15 @@ async function main(): Promise<void> {
     { body: answer },
   );
   if (noteRes instanceof Error) throw noteRes;
+
+  if (INCLUDE_ARTIFACTS && artifactHtmlFile != null) {
+    await renderDebugArtifactsHtml({
+      records: artifactRecords,
+      artifactHtmlFile,
+      cliVersion,
+      aiModel,
+    });
+  }
 
   process.stdout.write("Posted AI review comment to merge request.\n");
 }

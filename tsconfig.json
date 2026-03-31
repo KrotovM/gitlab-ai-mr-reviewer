@@ -13,9 +13,10 @@
     "strictNullChecks": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
+    "rootDir": "src",
     "outDir": "dist",
     "sourceMap": false
   },
-  "include": ["src/**/*.ts", "**/*.d.ts"],
+  "include": ["src/**/*.ts", "src/**/*.d.ts"],
   "exclude": ["dist", "node_modules"]
 }

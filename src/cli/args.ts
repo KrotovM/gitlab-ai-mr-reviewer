@@ -46,6 +46,11 @@ export function hasForceToolsFlag(argv: string[]): boolean {
   return args.has("--force-tools");
 }
 
+export function hasIncludeArtifactsFlag(argv: string[]): boolean {
+  const args = new Set(argv.slice(2));
+  return args.has("--include-artifacts");
+}
+
 export function parseIgnoreExtensions(argv: string[]): string[] {
   const parsed: string[] = [];
   const args = argv.slice(2);
