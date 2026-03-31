@@ -261,6 +261,54 @@ export function buildConsolidatePrompt(params: {
   ];
 }
 
+export function buildVerificationPrompt(params: {
+  perFileFindings: Array<{ path: string; findings: string }>;
+  summary: string;
+  consolidatedFindings: string;
+  maxFindings: number;
+}): ChatCompletionMessageParam[] {
+  const { perFileFindings, summary, consolidatedFindings, maxFindings } = params;
+  const findingsText = perFileFindings
+    .map((f) => `### ${f.path}\n${f.findings}`)
+    .join("\n\n");
+
+  return [
+    {
+      role: "system" as const,
+      content: [
+        "You are a skeptical verifier of a merge request review.",
+        "Your job is to remove weak, speculative, or unsupported findings from the draft list.",
+        "Do not add new findings. Keep, rewrite for clarity, or remove existing findings only.",
+        "A finding can stay only if it is directly supported by evidence from the per-file findings.",
+        "If confidence is not high, drop the finding.",
+        "Preserve this exact per-finding markdown block:",
+        "`- [high|medium] <title>`",
+        "`  File: <path>`",
+        "`  Line: ~<N>`",
+        "`  Why: <one concise sentence with key evidence>`",
+        "Do not add headings, summaries, or extra commentary.",
+        `Return at most ${maxFindings} findings.`,
+        'If no findings survive verification, return exactly: "No confirmed bugs or high-value optimizations found."',
+        "GitLab-flavoured markdown.",
+      ].join("\n"),
+    },
+    {
+      role: "user" as const,
+      content: [
+        `MR Summary: ${summary}`,
+        "",
+        "Per-file findings (evidence pool):",
+        findingsText,
+        "",
+        "Draft consolidated findings to verify:",
+        consolidatedFindings,
+        "",
+        "Return only the verified final findings.",
+      ].join("\n"),
+    },
+  ];
+}
+
 export function extractCompletionText(
   completion: ChatCompletion | Error | undefined,
 ): string | null {
