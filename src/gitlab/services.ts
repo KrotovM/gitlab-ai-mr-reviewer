@@ -3,7 +3,7 @@
 import type { ChatCompletion, ChatModel } from "openai/resources/index.mjs";
 import type { ChatCompletionMessageParam } from "openai/resources/index.js";
 import OpenAI from "openai";
-import { AI_MAX_OUTPUT_TOKENS, AI_MODEL_TEMPERATURE } from "../prompt/index.js";
+import { AI_MODEL_TEMPERATURE } from "../prompt/index.js";
 import {
   GitLabError,
   OpenAIError,
@@ -142,7 +142,6 @@ export async function generateAICompletion(
     completion = await openaiInstance.chat.completions.create({
       model: aiModel,
       temperature: AI_MODEL_TEMPERATURE,
-      max_tokens: AI_MAX_OUTPUT_TOKENS,
       stream: false,
       messages,
     });
@@ -249,10 +248,18 @@ export const searchRepository: GitLabFetchFunction<
   if (res instanceof Error || !res.ok) {
     const responseDetails = await (async () => {
       if (res instanceof Error) {
-        return { url: url.toString(), error: { name: res.name, message: res.message } };
+        return {
+          url: url.toString(),
+          error: { name: res.name, message: res.message },
+        };
       }
       const bodyText = await res.text().catch(() => "");
-      return { url: url.toString(), status: res.status, statusText: res.statusText, body: bodyText.slice(0, 1000) };
+      return {
+        url: url.toString(),
+        status: res.status,
+        statusText: res.statusText,
+        body: bodyText.slice(0, 1000),
+      };
     })();
     return new GitLabError({
       name: "SEARCH_FAILED",
