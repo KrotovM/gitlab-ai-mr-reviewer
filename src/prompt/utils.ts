@@ -25,7 +25,16 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
   if (normalized === "" || normalized === NO_ISSUES_SENTENCE) return normalized;
 
-  const lines = normalized.split("\n");
+  // Some providers collapse each finding into one long line.
+  // Expand inline markers so parser can recover structured blocks.
+  const expanded = normalized
+    .replace(/\s+(File:\s*)/gi, "\n$1")
+    .replace(/\s+(Line:\s*)/gi, "\n$1")
+    .replace(/\s+(Why:\s*)/gi, "\n$1")
+    .replace(/(Why:\s*[^\n]+?)\s+([-*•]\s*\[(?:high|medium)\])/gi, "$1\n$2")
+    .trim();
+
+  const lines = expanded.split("\n");
   const findings: Array<{
     severity: "high" | "medium";
     title: string;
@@ -34,7 +43,7 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
     why: string;
   }> = [];
 
-  const headerRe = /^\s*-?\s*\[(high|medium)\]\s+(.+?)\s*$/i;
+  const headerRe = /^\s*(?:[-*•]\s*)?\[(high|medium)\]\s+(.+?)\s*$/i;
   const fileRe = /^\s*[-*]?\s*File:\s*(.+?)\s*$/i;
   const lineRe = /^\s*[-*]?\s*Line:\s*(.+?)\s*$/i;
   const whyRe = /^\s*[-*]?\s*Why:\s*(.+?)\s*$/i;
