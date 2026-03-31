@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@krotovm/gitlab-ai-review",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "CLI tool to generate AI code reviews for GitLab merge requests.",
   "main": "dist/cli.js",
   "bin": {
