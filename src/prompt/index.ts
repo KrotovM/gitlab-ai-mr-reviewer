@@ -14,6 +14,17 @@ import {
   sanitizeGitLabMarkdown,
   truncateWithMarker,
 } from "./utils.js";
+import {
+  buildConsolidateSystemLines,
+  buildVerificationSystemLines,
+} from "./templates/postprocess-system.js";
+import {
+  buildConsolidateUserContent,
+  buildFileReviewUserContent,
+  buildMainReviewUserContent,
+  buildTriageUserContent,
+  buildVerificationUserContent,
+} from "./templates/user-prompts.js";
 
 export interface PromptLimits {
   maxDiffs: number;
@@ -79,15 +90,11 @@ export const buildPrompt = ({
     ? "Tools (get_file_at_ref, grep_repository) are available — use them to verify suspicions and inspect truncated or omitted files."
     : "Tools are unavailable in this run; rely only on visible diff evidence.";
 
-  const userContent = [
-    `Review the following code changes (git diff format). ${stats}`,
+  const userContent = buildMainReviewUserContent({
+    stats,
     toolNote,
-    "",
-    "Changes:",
-    changesText || "(no changes provided)",
-    "",
-    "Produce your review now. Follow the system instructions strictly.",
-  ].join("\n");
+    changesText,
+  });
 
   const boundedContent = truncateWithMarker(
     userContent,
@@ -103,8 +110,6 @@ export const buildPrompt = ({
 
 export const DEFAULT_MAX_FINDINGS = 5;
 export const DEFAULT_REVIEW_CONCURRENCY = 5;
-export const DIFF_SNIPPET_CHARS = 300;
-
 export interface TriageFileInput {
   path: string;
   new_file?: boolean;
@@ -121,22 +126,11 @@ export interface TriageResult {
 export function buildTriagePrompt(
   changes: TriageFileInput[],
 ): ChatCompletionMessageParam[] {
-  const fileEntries = changes.map((c) => {
-    const flags: string[] = [];
-    if (c.new_file) flags.push("new");
-    if (c.deleted_file) flags.push("deleted");
-    if (c.renamed_file) flags.push("renamed");
-    const flagStr = flags.length > 0 ? ` [${flags.join(", ")}]` : "";
-    const snippet = c.diff.slice(0, DIFF_SNIPPET_CHARS);
-    const truncNote = c.diff.length > DIFF_SNIPPET_CHARS ? "..." : "";
-    return `### ${c.path}${flagStr}\n\`\`\`\n${snippet}${truncNote}\n\`\`\``;
-  });
-
   return [
     TRIAGE_SYSTEM,
     {
       role: "user",
-      content: `Triage these ${changes.length} file(s):\n\n${fileEntries.join("\n\n")}`,
+      content: buildTriageUserContent(changes),
     },
   ];
 }
@@ -188,27 +182,17 @@ export function buildFileReviewPrompt(params: {
     ? "Tools (get_file_at_ref, grep_repository) are available to verify suspicions or read the full file."
     : "Tools are unavailable; rely only on visible diff evidence.";
 
-  const otherFilesNote =
-    otherChangedFiles.length > 0
-      ? `\nOther files changed in this MR: ${otherChangedFiles.join(", ")}`
-      : "";
-
   return [
     FILE_REVIEW_SYSTEM,
     {
       role: "user",
-      content: [
-        `MR Summary: ${summary}`,
-        otherFilesNote,
-        "",
-        toolNote,
-        "",
-        `File: ${filePath}`,
-        "Diff:",
+      content: buildFileReviewUserContent({
+        filePath,
         fileDiff,
-        "",
-        "Review this file now.",
-      ].join("\n"),
+        summary,
+        otherChangedFiles,
+        toolNote,
+      }),
     },
   ];
 }
@@ -235,32 +219,15 @@ export function buildConsolidatePrompt(params: {
   return [
     {
       role: "system" as const,
-      content: [
-        "You consolidate per-file code review findings into a final ranked list.",
-        `Select the top ${maxFindings} most important findings. Deduplicate overlapping issues.`,
-        "Preserve this exact per-finding markdown block:",
-        "`- [high|medium] <title>`",
-        "`  File: <path>`",
-        "`  Line: ~<N>`",
-        "`  Why: <one concise sentence with key evidence>`",
-        "Rank by: (1) [high] before [medium], (2) correctness > security > perf.",
-        "Do not add new findings. Do not add headings, summaries, or commentary.",
-        "Drop any finding that: claims a syntax error without quoting the invalid token, claims a function/variable is missing without concrete proof, or flags a refactoring rename as a bug.",
-        `If fewer than ${maxFindings} findings exist, return all of them.`,
-        'If all findings are low quality or dubious after dedup, return exactly: "No confirmed bugs or high-value optimizations found."',
-        "GitLab-flavoured markdown.",
-      ].join("\n"),
+      content: buildConsolidateSystemLines(maxFindings).join("\n"),
     },
     {
       role: "user" as const,
-      content: [
-        `MR Summary: ${summary}`,
-        "",
-        "Per-file findings:",
+      content: buildConsolidateUserContent({
+        summary,
         findingsText,
-        "",
-        `Return the top ${maxFindings} findings in the required bullet format.`,
-      ].join("\n"),
+        maxFindings,
+      }),
     },
   ];
 }
@@ -271,7 +238,8 @@ export function buildVerificationPrompt(params: {
   consolidatedFindings: string;
   maxFindings: number;
 }): ChatCompletionMessageParam[] {
-  const { perFileFindings, summary, consolidatedFindings, maxFindings } = params;
+  const { perFileFindings, summary, consolidatedFindings, maxFindings } =
+    params;
   const findingsText = perFileFindings
     .map((f) => `### ${f.path}\n${f.findings}`)
     .join("\n\n");
@@ -279,36 +247,15 @@ export function buildVerificationPrompt(params: {
   return [
     {
       role: "system" as const,
-      content: [
-        "You are a skeptical verifier of a merge request review.",
-        "Your job is to remove weak, speculative, or unsupported findings from the draft list.",
-        "Do not add new findings. Keep, rewrite for clarity, or remove existing findings only.",
-        "A finding can stay only if it is directly supported by evidence from the per-file findings.",
-        "If confidence is not high, drop the finding.",
-        "Preserve this exact per-finding markdown block:",
-        "`- [high|medium] <title>`",
-        "`  File: <path>`",
-        "`  Line: ~<N>`",
-        "`  Why: <one concise sentence with key evidence>`",
-        "Do not add headings, summaries, or extra commentary.",
-        `Return at most ${maxFindings} findings.`,
-        'If no findings survive verification, return exactly: "No confirmed bugs or high-value optimizations found."',
-        "GitLab-flavoured markdown.",
-      ].join("\n"),
+      content: buildVerificationSystemLines(maxFindings).join("\n"),
     },
     {
       role: "user" as const,
-      content: [
-        `MR Summary: ${summary}`,
-        "",
-        "Per-file findings (evidence pool):",
+      content: buildVerificationUserContent({
+        summary,
         findingsText,
-        "",
-        "Draft consolidated findings to verify:",
         consolidatedFindings,
-        "",
-        "Return only the verified final findings.",
-      ].join("\n"),
+      }),
     },
   ];
 }
@@ -337,10 +284,9 @@ export function extractCompletionText(
 }
 
 const ERROR_ANSWER =
-  "I'm sorry, I'm not feeling well today. Please ask a human to review this code change.";
+  "AI review could not be completed. Please ask a human to review this code change.";
 
-const DISCLAIMER =
-  "This comment was generated by an artificial intelligence duck.";
+const DISCLAIMER = "This comment was generated by AI review bot.";
 
 export const buildAnswer = (
   completion: ChatCompletion | Error | undefined,
