@@ -19,7 +19,8 @@ export function sanitizeGitLabMarkdown(input: string): string {
   return withClosedFence;
 }
 
-const NO_ISSUES_SENTENCE = "No confirmed bugs or high-value optimizations found.";
+const NO_ISSUES_SENTENCE =
+  "No confirmed bugs or high-value optimizations found.";
 
 export function normalizeReviewFindingsMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
@@ -101,8 +102,7 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
   return findings
     .map(
       (f) =>
-        `- [${f.severity}] ${f.title}\n  File: ${f.file}\n  Line: ${f.line}\n  Why: ${f.why}`,
+        `- [${f.severity}] ${f.title}  \n  File: ${f.file}  \n  Line: ${f.line}  \n  Why: ${f.why}`,
     )
     .join("\n\n");
 }
-
