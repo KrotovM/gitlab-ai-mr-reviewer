@@ -237,9 +237,15 @@ export function buildVerificationPrompt(params: {
   summary: string;
   consolidatedFindings: string;
   maxFindings: number;
+  refs: { base: string; head: string };
 }): ChatCompletionMessageParam[] {
-  const { perFileFindings, summary, consolidatedFindings, maxFindings } =
-    params;
+  const {
+    perFileFindings,
+    summary,
+    consolidatedFindings,
+    maxFindings,
+    refs,
+  } = params;
   const findingsText = perFileFindings
     .map((f) => `### ${f.path}\n${f.findings}`)
     .join("\n\n");
@@ -255,6 +261,7 @@ export function buildVerificationPrompt(params: {
         summary,
         findingsText,
         consolidatedFindings,
+        refs,
       }),
     },
   ];

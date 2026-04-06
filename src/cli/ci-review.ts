@@ -24,6 +24,7 @@ import {
   logToolUsageMinimal,
   MAX_FILE_TOOL_ROUNDS,
   MAX_TOOL_ROUNDS,
+  MAX_VERIFICATION_TOOL_ROUNDS,
   TOOL_NAME_GET_FILE,
   TOOL_NAME_GREP,
 } from "./tooling.js";
@@ -617,6 +618,193 @@ async function runFileReviewWithTools(params: {
   return extractCompletionText(final) ?? "No issues found.";
 }
 
+function draftHasStructuredFindings(consolidatedText: string): boolean {
+  return /-\s*\[(?:high|medium)\]/i.test(consolidatedText);
+}
+
+async function runVerificationWithTools(params: {
+  openaiInstance: OpenAI;
+  aiModel: ChatModel;
+  baseMessages: ChatCompletionMessageParam[];
+  refs: { base: string; head: string };
+  gitLabProjectApiUrl: URL;
+  projectId: string;
+  headers: Record<string, string>;
+  forceTools: boolean;
+  consolidatedDraft: string;
+  loggers: LoggerFns;
+  debugDumpFile?: string;
+  debugRecordWriter?: DebugRecordWriter;
+}): Promise<any> {
+  const {
+    openaiInstance,
+    aiModel,
+    baseMessages,
+    refs,
+    gitLabProjectApiUrl,
+    projectId,
+    headers,
+    forceTools,
+    consolidatedDraft,
+    loggers,
+    debugDumpFile,
+    debugRecordWriter,
+  } = params;
+  const { logDebug, logStep } = loggers;
+
+  const messages: ChatCompletionMessageParam[] = [...baseMessages];
+
+  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GET_FILE,
+        description:
+          "Fetch raw file content at a specific git ref for review context.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string", description: "Repository file path." },
+            ref: {
+              type: "string",
+              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
+            },
+          },
+          required: ["path", "ref"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GREP,
+        description:
+          "Search the repository for a keyword or pattern. Returns up to 10 matching code fragments with file paths and line numbers.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: {
+              type: "string",
+              description:
+                "Search string (keyword, function name, variable, etc.).",
+            },
+            ref: {
+              type: "string",
+              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
+
+  const verificationForceRound0 =
+    forceTools && draftHasStructuredFindings(consolidatedDraft);
+
+  for (let round = 0; round < MAX_VERIFICATION_TOOL_ROUNDS; round += 1) {
+    const completion = await createCompletionWithDebug({
+      openaiInstance,
+      requestLabel: `verification_pass_round_${round + 1}`,
+      debugDumpFile,
+      debugRecordWriter,
+      request: {
+        model: aiModel,
+        temperature: 0,
+        stream: false,
+        messages,
+        tools,
+        tool_choice: verificationForceRound0 && round === 0 ? "required" : "auto",
+      },
+    });
+    const message = completion.choices[0]?.message;
+    if (message == null) return completion;
+
+    const toolCalls = message.tool_calls ?? [];
+    logDebug(
+      `verification round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
+    );
+    if (toolCalls.length === 0) return completion;
+
+    messages.push({
+      role: "assistant",
+      content: message.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const toolCall of toolCalls) {
+      if (toolCall.type !== "function") continue;
+      const toolName = toolCall.function.name;
+      const argsRaw = toolCall.function.arguments ?? "{}";
+      await appendDebugDump(debugDumpFile, debugRecordWriter, {
+        kind: "tool_call",
+        phase: "verification",
+        round: round + 1,
+        id: toolCall.id,
+        name: toolName,
+        arguments: argsRaw,
+      });
+      logToolUsageMinimal(logStep, toolName, argsRaw, "(verify)");
+      let toolContent: string;
+      if (toolName === TOOL_NAME_GET_FILE) {
+        toolContent = await handleGetFileTool(
+          argsRaw,
+          gitLabProjectApiUrl,
+          headers,
+        );
+      } else if (toolName === TOOL_NAME_GREP) {
+        toolContent = await handleGrepTool(
+          argsRaw,
+          refs.head,
+          gitLabProjectApiUrl,
+          headers,
+          projectId,
+        );
+      } else {
+        toolContent = JSON.stringify({
+          ok: false,
+          error: `Unknown tool "${toolName}"`,
+        });
+      }
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: toolContent,
+      });
+      await appendDebugDump(debugDumpFile, debugRecordWriter, {
+        kind: "tool_response",
+        phase: "verification",
+        round: round + 1,
+        id: toolCall.id,
+        name: toolName,
+        content: toolContent,
+      });
+      logDebug(
+        `verification tool id=${toolCall.id} name=${toolName} payload=${toolContent.slice(0, 300)}`,
+      );
+    }
+  }
+
+  messages.push({
+    role: "user",
+    content: `Tool-call limit reached (${MAX_VERIFICATION_TOOL_ROUNDS}). Do not call tools. Output only the verified findings in the required format.`,
+  });
+  return createCompletionWithDebug({
+    openaiInstance,
+    requestLabel: "verification_pass_final_after_tool_limit",
+    debugDumpFile,
+    debugRecordWriter,
+    request: {
+      model: aiModel,
+      temperature: 0,
+      stream: false,
+      messages,
+    },
+  });
+}
+
 export async function reviewMergeRequestMultiPass(params: {
   openaiInstance: OpenAI;
   aiModel: ChatModel;
@@ -771,25 +959,28 @@ export async function reviewMergeRequestMultiPass(params: {
       return buildAnswer(consolidateCompletion);
     }
 
-    logStep("Pass 4/4: verifying consolidated findings");
+    logStep("Pass 4/4: verifying consolidated findings (repo tools)");
     const verificationMessages = buildVerificationPrompt({
       perFileFindings,
       summary: triageResult.summary,
       consolidatedFindings: consolidatedText,
       maxFindings,
+      refs,
     });
     try {
-      const verificationCompletion = await createCompletionWithDebug({
+      const verificationCompletion = await runVerificationWithTools({
         openaiInstance,
-        requestLabel: "verification_pass",
+        aiModel,
+        baseMessages: verificationMessages,
+        refs,
+        gitLabProjectApiUrl,
+        projectId,
+        headers,
+        forceTools,
+        consolidatedDraft: consolidatedText,
+        loggers,
         debugDumpFile,
         debugRecordWriter,
-        request: {
-          model: aiModel,
-          temperature: 0.0,
-          stream: false,
-          messages: verificationMessages,
-        },
       });
       return buildAnswer(verificationCompletion);
     } catch (error: any) {

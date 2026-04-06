@@ -86,10 +86,13 @@ export function buildVerificationUserContent(params: {
   summary: string;
   findingsText: string;
   consolidatedFindings: string;
+  refs: { base: string; head: string };
 }): string {
-  const { summary, findingsText, consolidatedFindings } = params;
+  const { summary, findingsText, consolidatedFindings, refs } = params;
   return [
     `MR Summary: ${summary}`,
+    "",
+    `Refs for tools: head (post-change)="${refs.head}", base="${refs.base}". Prefer head when checking whether the issue exists in the MR.`,
     "",
     "Per-file findings (evidence pool):",
     findingsText,
