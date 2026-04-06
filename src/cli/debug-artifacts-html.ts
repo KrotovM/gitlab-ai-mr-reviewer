@@ -93,10 +93,37 @@ export async function renderDebugArtifactsHtml(params: {
     k.startsWith("file_review_.gitlab-ci.yml_round_"),
   );
   const consolidateLabel = "consolidate_pass";
-  const verificationLabel = "verification_pass";
+
+  function pickVerificationSection(): { label: string; content: string } {
+    const afterLimit = getContent("verification_pass_final_after_tool_limit");
+    if (afterLimit.trim() !== "")
+      return {
+        label: "verification_pass_final_after_tool_limit",
+        content: afterLimit,
+      };
+    const roundLabels = Array.from(byLabel.keys())
+      .filter((k) => k.startsWith("verification_pass_round_"))
+      .sort((a, b) => {
+        const na = Number(a.replace("verification_pass_round_", ""));
+        const nb = Number(b.replace("verification_pass_round_", ""));
+        return na - nb;
+      });
+    for (let i = roundLabels.length - 1; i >= 0; i--) {
+      const lbl = roundLabels[i]!;
+      const c = getContent(lbl);
+      if (c.trim() !== "") return { label: lbl, content: c };
+    }
+    const legacy = getContent("verification_pass");
+    if (legacy.trim() !== "")
+      return { label: "verification_pass", content: legacy };
+    return { label: "verification_pass_round_1", content: "" };
+  }
+
+  const verificationSection = pickVerificationSection();
+  const verificationLabel = verificationSection.label;
 
   const finalStatus =
-    getContent(verificationLabel).trim() !== "" ? "Verified" : "Fallback";
+    verificationSection.content.trim() !== "" ? "Verified" : "Fallback";
 
   const html = `<!doctype html>
 <html lang="en">
@@ -165,7 +192,7 @@ export async function renderDebugArtifactsHtml(params: {
     <h2>Pass 4 — Verification</h2>
     <div class="section">
       <div class="row"><span class="badge">label: ${escapeHtml(verificationLabel)}</span><span class="tokens">${escapeHtml(getTokenTriplet(verificationLabel))}</span></div>
-      ${renderFindings(getContent(verificationLabel))}
+      ${renderFindings(verificationSection.content)}
     </div>
   </div>
 </body>

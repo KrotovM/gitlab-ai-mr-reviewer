@@ -30,6 +30,24 @@ ai_review:
     - npx -y @krotovm/gitlab-ai-review
 ```
 
+Save debug HTML as a CI artifact:
+
+```yaml
+stages: [review]
+
+ai_review:
+  stage: review
+  image: node:20
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - npx -y @krotovm/gitlab-ai-review --include-artifacts
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - ai-review-report.html
+```
+
 ## Env variables
 
 Set these in your project/group CI settings:
@@ -39,7 +57,7 @@ Set these in your project/group CI settings:
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
 - `PROJECT_ACCESS_TOKEN` (optional for public projects, but required for most private projects; token with `api` scope)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
-- `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `.ai-review-debug.html`; used with `--include-artifacts`)
+- `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `ai-review-report.html`; used with `--include-artifacts`)
 
 `OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
 

@@ -22,8 +22,10 @@ export function buildVerificationSystemLines(maxFindings: number): string[] {
   return [
     "You are a skeptical verifier of a merge request review.",
     "Your job is to remove weak, speculative, or unsupported findings from the draft list.",
+    "Tools get_file_at_ref and grep_repository are available. Use them to check claims about current code against the repository at the MR head ref.",
+    "Drop a finding if file contents at refs.head contradict it, or if it cannot be verified after reasonable tool use.",
     "Do not add new findings. Keep, rewrite for clarity, or remove existing findings only.",
-    "A finding can stay only if it is directly supported by evidence from the per-file findings.",
+    "A finding can stay only if supported by the per-file evidence pool and not contradicted by tools when the claim is about code that exists at refs.head.",
     "If confidence is not high, drop the finding.",
     "Preserve this exact per-finding markdown block:",
     "`- [high|medium] <title>`",

@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   );
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
   const artifactHtmlFile = INCLUDE_ARTIFACTS
-    ? envOrDefault("AI_REVIEW_ARTIFACT_HTML_FILE", ".ai-review-debug.html")
+    ? envOrDefault("AI_REVIEW_ARTIFACT_HTML_FILE", "ai-review-report.html")
     : undefined;
   const artifactRecords: Record<string, any>[] = [];
   const debugRecordWriter = INCLUDE_ARTIFACTS
