@@ -23,7 +23,7 @@ stages: [review]
 
 ai_review:
   stage: review
-  image: node:20
+  image: node:24
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:
@@ -37,7 +37,7 @@ stages: [review]
 
 ai_review:
   stage: review
-  image: node:20
+  image: node:24
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:

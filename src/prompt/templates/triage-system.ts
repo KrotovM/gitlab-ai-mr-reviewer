@@ -11,8 +11,12 @@ export const TRIAGE_SYSTEM_LINES: string[] = [
   "",
   "Rules:",
   "- When in doubt, verdict is NEEDS_REVIEW.",
+  "- Look beyond comments and JSDoc: if the diff changes function signatures, return types, control flow, variable assignments, or adds/removes code lines (not just comments), it is a logic change → NEEDS_REVIEW.",
+  "- If a file mixes doc/comment edits with actual code changes, verdict is NEEDS_REVIEW.",
+  "- Refactoring (splitting/merging functions, changing data structures, renaming with signature changes) is NEEDS_REVIEW.",
   "- Deleted files are SKIP unless the deletion could break dependents.",
   "- New files containing logic are NEEDS_REVIEW.",
-  "- Test-only files are SKIP unless they cover security-critical or complex logic.",
+  "- Test files that add, remove, or change assertions or expected values are NEEDS_REVIEW.",
+  "- Test-only files are SKIP only if changes are purely cosmetic (formatting, comments).",
   "- Config/CI/docs files are SKIP unless they modify build targets, env vars, or secrets.",
 ];
