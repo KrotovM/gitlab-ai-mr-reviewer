@@ -123,6 +123,11 @@ export interface TriageResult {
   files: Array<{ path: string; verdict: "NEEDS_REVIEW" | "SKIP" }>;
 }
 
+export type TriageParseFailureReason =
+  | "empty_response"
+  | "invalid_json"
+  | "invalid_schema";
+
 export function buildTriagePrompt(
   changes: TriageFileInput[],
 ): ChatCompletionMessageParam[] {
@@ -136,31 +141,56 @@ export function buildTriagePrompt(
 }
 
 export function parseTriageResponse(text: string): TriageResult | null {
+  return parseTriageResponseDetailed(text).result;
+}
+
+export function parseTriageResponseDetailed(text: string): {
+  result: TriageResult | null;
+  reason: TriageParseFailureReason | null;
+  parseError: string | null;
+} {
+  const cleaned = text
+    .replace(/```json?\s*/g, "")
+    .replace(/```\s*/g, "")
+    .trim();
+  if (cleaned === "") {
+    return { result: null, reason: "empty_response", parseError: null };
+  }
   try {
-    const cleaned = text
-      .replace(/```json?\s*/g, "")
-      .replace(/```\s*/g, "")
-      .trim();
     const parsed = JSON.parse(cleaned);
     if (typeof parsed.summary === "string" && Array.isArray(parsed.files)) {
       return {
-        summary: parsed.summary,
-        files: parsed.files
-          .filter(
-            (f: any) =>
-              typeof f.path === "string" &&
-              (f.verdict === "NEEDS_REVIEW" || f.verdict === "SKIP"),
-          )
-          .map((f: any) => ({
-            path: f.path as string,
-            verdict: f.verdict as "NEEDS_REVIEW" | "SKIP",
-          })),
+        result: {
+          summary: parsed.summary,
+          files: parsed.files
+            .filter(
+              (f: any) =>
+                typeof f.path === "string" &&
+                (f.verdict === "NEEDS_REVIEW" || f.verdict === "SKIP"),
+            )
+            .map((f: any) => ({
+              path: f.path as string,
+              verdict: f.verdict as "NEEDS_REVIEW" | "SKIP",
+            })),
+        },
+        reason: null,
+        parseError: null,
       };
     }
-  } catch {
+    return { result: null, reason: "invalid_schema", parseError: null };
+  } catch (error: any) {
     // JSON parse failure — caller will fall back to single-pass.
+    return {
+      result: null,
+      reason: "invalid_json",
+      parseError:
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : JSON.stringify(error),
+    };
   }
-  return null;
 }
 
 export function buildFileReviewPrompt(params: {

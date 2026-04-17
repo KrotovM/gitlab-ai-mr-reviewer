@@ -11,7 +11,9 @@ import {
   buildTriagePrompt,
   buildVerificationPrompt,
   extractCompletionText,
+  parseTriageResponseDetailed,
   parseTriageResponse,
+  type TriageParseFailureReason,
   type PromptLimits,
   type TriageFileInput,
 } from "../prompt/index.js";
@@ -262,6 +264,9 @@ export async function reviewMergeRequestWithTools(params: {
     debugRecordWriter,
   } = params;
   const { logDebug, logStep } = loggers;
+  logStep(
+    `Single-pass review started for ${changes.length} file(s) (fallback mode).`,
+  );
 
   const messages: ChatCompletionMessageParam[] = buildPrompt({
     changes: changes.map((change) => ({ diff: change.diff })),
@@ -321,6 +326,9 @@ export async function reviewMergeRequestWithTools(params: {
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    logStep(
+      `Single-pass round ${round + 1}/${MAX_TOOL_ROUNDS}: requesting model response...`,
+    );
     const completion = await createCompletionWithDebug({
       openaiInstance,
       requestLabel: `main_review_round_${round + 1}`,
@@ -341,6 +349,9 @@ export async function reviewMergeRequestWithTools(params: {
     const toolCalls = message.tool_calls ?? [];
     logDebug(
       `main-review round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
+    );
+    logStep(
+      `Single-pass round ${round + 1}: model returned ${toolCalls.length} tool call(s).`,
     );
     if (toolCalls.length === 0) return buildAnswer(completion);
 
@@ -407,6 +418,7 @@ export async function reviewMergeRequestWithTools(params: {
     role: "user",
     content: `Tool-call limit reached (${MAX_TOOL_ROUNDS}). Do not call any tools. Provide your best-effort final review now, strictly following the required output format. If confidence is low, return the exact no-issues sentence.`,
   });
+  logStep("Single-pass tool-call limit reached. Requesting final answer.");
   const finalCompletion = await createCompletionWithDebug({
     openaiInstance,
     requestLabel: "main_review_final_after_tool_limit",
@@ -850,6 +862,8 @@ export async function reviewMergeRequestMultiPass(params: {
   const triageMessages = buildTriagePrompt(triageInputs);
   let triageResult: ReturnType<typeof parseTriageResponse> = null;
   let triageText: string | null = null;
+  let triageParseReason: TriageParseFailureReason | null = null;
+  let triageParseError: string | null = null;
   try {
     const triageCompletion = await createCompletionWithDebug({
       openaiInstance,
@@ -865,7 +879,12 @@ export async function reviewMergeRequestMultiPass(params: {
       },
     });
     triageText = extractCompletionText(triageCompletion);
-    if (triageText != null) triageResult = parseTriageResponse(triageText);
+    if (triageText != null) {
+      const triageParse = parseTriageResponseDetailed(triageText);
+      triageResult = triageParse.result;
+      triageParseReason = triageParse.reason;
+      triageParseError = triageParse.parseError;
+    }
   } catch (error: any) {
     logStep(
       `Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`,
@@ -876,8 +895,14 @@ export async function reviewMergeRequestMultiPass(params: {
     if (triageText != null) {
       const triagePreview = triageText.replace(/\s+/g, " ").trim().slice(0, 200);
       const looksLikeHtml = /<html|<!doctype html/i.test(triageText);
+      const parseReasonText =
+        triageParseReason != null
+          ? `reason=${triageParseReason}`
+          : `reason=${looksLikeHtml ? "html_response" : "unknown_non_json"}`;
+      const parseErrorText =
+        triageParseError != null ? ` parse_error=${triageParseError}` : "";
       logStep(
-        `Triage parse failed: expected JSON but got ${looksLikeHtml ? "HTML/non-JSON" : "non-JSON"} response. Preview: ${triagePreview || "<empty>"}`,
+        `Triage parse failed: ${parseReasonText}.${parseErrorText} Preview: ${triagePreview || "<empty>"}`,
       );
     } else {
       logStep("Triage parse failed: model returned empty response body.");
