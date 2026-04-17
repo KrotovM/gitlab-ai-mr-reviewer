@@ -849,6 +849,7 @@ export async function reviewMergeRequestMultiPass(params: {
   }));
   const triageMessages = buildTriagePrompt(triageInputs);
   let triageResult: ReturnType<typeof parseTriageResponse> = null;
+  let triageText: string | null = null;
   try {
     const triageCompletion = await createCompletionWithDebug({
       openaiInstance,
@@ -863,7 +864,7 @@ export async function reviewMergeRequestMultiPass(params: {
         response_format: { type: "json_object" },
       },
     });
-    const triageText = extractCompletionText(triageCompletion);
+    triageText = extractCompletionText(triageCompletion);
     if (triageText != null) triageResult = parseTriageResponse(triageText);
   } catch (error: any) {
     logStep(
@@ -872,7 +873,16 @@ export async function reviewMergeRequestMultiPass(params: {
   }
 
   if (triageResult == null) {
-    logStep("Triage parse failed. Falling back to single-pass pipeline.");
+    if (triageText != null) {
+      const triagePreview = triageText.replace(/\s+/g, " ").trim().slice(0, 200);
+      const looksLikeHtml = /<html|<!doctype html/i.test(triageText);
+      logStep(
+        `Triage parse failed: expected JSON but got ${looksLikeHtml ? "HTML/non-JSON" : "non-JSON"} response. Preview: ${triagePreview || "<empty>"}`,
+      );
+    } else {
+      logStep("Triage parse failed: model returned empty response body.");
+    }
+    logStep("Falling back to single-pass pipeline.");
     return await reviewMergeRequestWithTools({
       openaiInstance,
       aiModel,

@@ -239,13 +239,8 @@ export function buildVerificationPrompt(params: {
   maxFindings: number;
   refs: { base: string; head: string };
 }): ChatCompletionMessageParam[] {
-  const {
-    perFileFindings,
-    summary,
-    consolidatedFindings,
-    maxFindings,
-    refs,
-  } = params;
+  const { perFileFindings, summary, consolidatedFindings, maxFindings, refs } =
+    params;
   const findingsText = perFileFindings
     .map((f) => `### ${f.path}\n${f.findings}`)
     .join("\n\n");
