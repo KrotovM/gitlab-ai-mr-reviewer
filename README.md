@@ -55,6 +55,7 @@ Set these in your project/group CI settings:
 - `OPENAI_API_KEY` (required)
 - `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
+- `AI_PROMPT_PROFILE` (optional, default: `default`; one of `default` \| `weak`). Use `weak` for small or heavily-quantized models (≤ ~7B, local Ollama, etc.). The `weak` profile uses shorter system prompts, positive rules instead of negations, and inline few-shot examples for triage / per-file review / consolidation / verification, which dramatically improves output-format adherence on weak models.
 - `PROJECT_ACCESS_TOKEN` (optional for public projects, but required for most private projects; token with `api` scope)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
 - `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `ai-review-report.html`; used with `--include-artifacts`)

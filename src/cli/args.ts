@@ -2,7 +2,9 @@
 
 import {
   DEFAULT_PROMPT_LIMITS,
+  parsePromptProfile as parsePromptProfileValue,
   type PromptLimits,
+  type PromptProfile,
 } from "../prompt/index.js";
 
 export function requireEnvs(names: string[]): Record<string, string> {
@@ -130,5 +132,11 @@ export function hasIgnoredExtension(
 ): boolean {
   const lowerPath = filePath.toLowerCase();
   return ignoredExtensions.some((ext) => lowerPath.endsWith(ext));
+}
+
+/** Reads AI_PROMPT_PROFILE (values: "default" | "weak"). Anything else falls
+ *  back to the default profile. */
+export function readPromptProfileFromEnv(): PromptProfile {
+  return parsePromptProfileValue(process.env["AI_PROMPT_PROFILE"]);
 }
 

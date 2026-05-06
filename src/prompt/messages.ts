@@ -2,24 +2,40 @@
 
 import type { ChatCompletionMessageParam } from "openai/resources/index.mjs";
 import {
-  FILE_REVIEW_SYSTEM_LINES,
-  MAIN_SYSTEM_LINES,
+  getFileReviewSystemLines,
+  getMainSystemLines,
 } from "./templates/review-system.js";
-import { TRIAGE_SYSTEM_LINES } from "./templates/triage-system.js";
+import { getTriageSystemLines } from "./templates/triage-system.js";
+import type { PromptProfile } from "./profile.js";
+import { DEFAULT_PROMPT_PROFILE } from "./profile.js";
 
-export const buildMainSystemMessages = (): ChatCompletionMessageParam[] => [
+export const buildMainSystemMessages = (
+  profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
+): ChatCompletionMessageParam[] => [
   {
     role: "system",
-    content: MAIN_SYSTEM_LINES.join("\n"),
+    content: getMainSystemLines(profile).join("\n"),
   },
 ];
 
-export const TRIAGE_SYSTEM: ChatCompletionMessageParam = {
+export const buildTriageSystemMessage = (
+  profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
+): ChatCompletionMessageParam => ({
   role: "system",
-  content: TRIAGE_SYSTEM_LINES.join("\n"),
-};
+  content: getTriageSystemLines(profile).join("\n"),
+});
 
-export const FILE_REVIEW_SYSTEM: ChatCompletionMessageParam = {
+export const buildFileReviewSystemMessage = (
+  profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
+): ChatCompletionMessageParam => ({
   role: "system",
-  content: FILE_REVIEW_SYSTEM_LINES.join("\n"),
-};
+  content: getFileReviewSystemLines(profile).join("\n"),
+});
+
+/** @deprecated kept for backward compatibility — use buildTriageSystemMessage(). */
+export const TRIAGE_SYSTEM: ChatCompletionMessageParam =
+  buildTriageSystemMessage();
+
+/** @deprecated kept for backward compatibility — use buildFileReviewSystemMessage(). */
+export const FILE_REVIEW_SYSTEM: ChatCompletionMessageParam =
+  buildFileReviewSystemMessage();
