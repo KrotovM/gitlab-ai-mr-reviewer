@@ -1,5 +1,43 @@
 /** @format */
 
+/** Extract the first balanced JSON object substring from arbitrary text.
+ *  Useful when an LLM wraps JSON in prose ("Here is the result: { ... }").
+ *  Returns null if no balanced object is found. */
+export function extractFirstJsonObject(input: string): string | null {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i]!;
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}") {
+      if (depth === 0) continue;
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        return input.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
 export function truncateWithMarker(
   value: string,
   maxChars: number,

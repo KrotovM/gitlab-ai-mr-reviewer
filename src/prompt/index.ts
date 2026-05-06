@@ -5,18 +5,19 @@ import type {
   ChatCompletion,
 } from "openai/resources/index.mjs";
 import {
+  buildFileReviewSystemMessage,
   buildMainSystemMessages,
-  FILE_REVIEW_SYSTEM,
-  TRIAGE_SYSTEM,
+  buildTriageSystemMessage,
 } from "./messages.js";
 import {
+  extractFirstJsonObject,
   normalizeReviewFindingsMarkdown,
   sanitizeGitLabMarkdown,
   truncateWithMarker,
 } from "./utils.js";
 import {
-  buildConsolidateSystemLines,
-  buildVerificationSystemLines,
+  getConsolidateSystemLines,
+  getVerificationSystemLines,
 } from "./templates/postprocess-system.js";
 import {
   buildConsolidateUserContent,
@@ -25,6 +26,16 @@ import {
   buildTriageUserContent,
   buildVerificationUserContent,
 } from "./templates/user-prompts.js";
+import type { PromptProfile } from "./profile.js";
+import { DEFAULT_PROMPT_PROFILE, isEmptyReviewBody } from "./profile.js";
+
+export type { PromptProfile } from "./profile.js";
+export {
+  DEFAULT_PROMPT_PROFILE,
+  NO_FINDINGS_SENTENCE,
+  isEmptyReviewBody,
+  parsePromptProfile,
+} from "./profile.js";
 
 export interface PromptLimits {
   maxDiffs: number;
@@ -38,8 +49,6 @@ export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
   maxTotalPromptChars: 220000,
 };
 
-const MESSAGES: ChatCompletionMessageParam[] = buildMainSystemMessages();
-
 export const AI_MODEL_TEMPERATURE = 0.2;
 export const AI_MAX_OUTPUT_TOKENS = 600;
 
@@ -47,12 +56,14 @@ export interface BuildPromptParameters {
   changes: Array<{ diff: string }>;
   limits?: Partial<PromptLimits>;
   allowTools?: boolean;
+  profile?: PromptProfile;
 }
 
 export const buildPrompt = ({
   changes,
   limits,
   allowTools = false,
+  profile = DEFAULT_PROMPT_PROFILE,
 }: BuildPromptParameters): ChatCompletionMessageParam[] => {
   const effectiveLimits: PromptLimits = {
     ...DEFAULT_PROMPT_LIMITS,
@@ -101,7 +112,10 @@ export const buildPrompt = ({
     effectiveLimits.maxTotalPromptChars,
     "prompt payload",
   );
-  return [...MESSAGES, { role: "user", content: boundedContent }];
+  return [
+    ...buildMainSystemMessages(profile),
+    { role: "user", content: boundedContent },
+  ];
 };
 
 // ---------------------------------------------------------------------------
@@ -130,9 +144,10 @@ export type TriageParseFailureReason =
 
 export function buildTriagePrompt(
   changes: TriageFileInput[],
+  profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
 ): ChatCompletionMessageParam[] {
   return [
-    TRIAGE_SYSTEM,
+    buildTriageSystemMessage(profile),
     {
       role: "user",
       content: buildTriageUserContent(changes),
@@ -156,41 +171,66 @@ export function parseTriageResponseDetailed(text: string): {
   if (cleaned === "") {
     return { result: null, reason: "empty_response", parseError: null };
   }
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (typeof parsed.summary === "string" && Array.isArray(parsed.files)) {
-      return {
-        result: {
-          summary: parsed.summary,
-          files: parsed.files
-            .filter(
-              (f: any) =>
-                typeof f.path === "string" &&
-                (f.verdict === "NEEDS_REVIEW" || f.verdict === "SKIP"),
-            )
-            .map((f: any) => ({
-              path: f.path as string,
-              verdict: f.verdict as "NEEDS_REVIEW" | "SKIP",
-            })),
-        },
-        reason: null,
-        parseError: null,
-      };
+
+  const tryParse = (
+    src: string,
+  ): { parsed: unknown; error: string | null } => {
+    try {
+      return { parsed: JSON.parse(src), error: null };
+    } catch (e: unknown) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : typeof e === "string"
+            ? e
+            : JSON.stringify(e);
+      return { parsed: null, error: msg };
     }
-    return { result: null, reason: "invalid_schema", parseError: null };
-  } catch (error: any) {
-    // JSON parse failure — caller will fall back to single-pass.
+  };
+
+  let attempt = tryParse(cleaned);
+
+  // Some providers ignore JSON-mode and prefix prose like "Here is the JSON: {...}".
+  // Recover by extracting the first balanced {...} block and parsing that.
+  if (attempt.parsed == null) {
+    const extracted = extractFirstJsonObject(cleaned);
+    if (extracted != null && extracted !== cleaned) {
+      attempt = tryParse(extracted);
+    }
+  }
+
+  if (attempt.parsed == null || typeof attempt.parsed !== "object") {
     return {
       result: null,
       reason: "invalid_json",
-      parseError:
-        error instanceof Error
-          ? error.message
-          : typeof error === "string"
-            ? error
-            : JSON.stringify(error),
+      parseError: attempt.error,
     };
   }
+
+  const parsed = attempt.parsed as { summary?: unknown; files?: unknown };
+  if (typeof parsed.summary === "string" && Array.isArray(parsed.files)) {
+    return {
+      result: {
+        summary: parsed.summary,
+        files: parsed.files
+          .filter(
+            (f: unknown): f is { path: string; verdict: string } =>
+              typeof f === "object" &&
+              f != null &&
+              typeof (f as { path?: unknown }).path === "string" &&
+              ((f as { verdict?: unknown }).verdict === "NEEDS_REVIEW" ||
+                (f as { verdict?: unknown }).verdict === "SKIP"),
+          )
+          .map((f) => ({
+            path: f.path,
+            verdict: f.verdict as "NEEDS_REVIEW" | "SKIP",
+          })),
+      },
+      reason: null,
+      parseError: null,
+    };
+  }
+  return { result: null, reason: "invalid_schema", parseError: null };
 }
 
 export function buildFileReviewPrompt(params: {
@@ -199,6 +239,7 @@ export function buildFileReviewPrompt(params: {
   summary: string;
   otherChangedFiles: string[];
   allowTools?: boolean;
+  profile?: PromptProfile;
 }): ChatCompletionMessageParam[] {
   const {
     filePath,
@@ -206,6 +247,7 @@ export function buildFileReviewPrompt(params: {
     summary,
     otherChangedFiles,
     allowTools = false,
+    profile = DEFAULT_PROMPT_PROFILE,
   } = params;
 
   const toolNote = allowTools
@@ -213,7 +255,7 @@ export function buildFileReviewPrompt(params: {
     : "Tools are unavailable; rely only on visible diff evidence.";
 
   return [
-    FILE_REVIEW_SYSTEM,
+    buildFileReviewSystemMessage(profile),
     {
       role: "user",
       content: buildFileReviewUserContent({
@@ -231,14 +273,16 @@ export function buildConsolidatePrompt(params: {
   perFileFindings: Array<{ path: string; findings: string }>;
   summary: string;
   maxFindings: number;
+  profile?: PromptProfile;
 }): ChatCompletionMessageParam[] | null {
-  const { perFileFindings, summary, maxFindings } = params;
+  const {
+    perFileFindings,
+    summary,
+    maxFindings,
+    profile = DEFAULT_PROMPT_PROFILE,
+  } = params;
 
-  const meaningful = perFileFindings.filter(
-    (f) =>
-      !f.findings.includes("No issues found.") &&
-      !f.findings.includes("No confirmed bugs"),
-  );
+  const meaningful = perFileFindings.filter((f) => !isEmptyReviewBody(f.findings));
 
   if (meaningful.length === 0) return null;
 
@@ -249,7 +293,7 @@ export function buildConsolidatePrompt(params: {
   return [
     {
       role: "system" as const,
-      content: buildConsolidateSystemLines(maxFindings).join("\n"),
+      content: getConsolidateSystemLines(profile, maxFindings).join("\n"),
     },
     {
       role: "user" as const,
@@ -268,9 +312,16 @@ export function buildVerificationPrompt(params: {
   consolidatedFindings: string;
   maxFindings: number;
   refs: { base: string; head: string };
+  profile?: PromptProfile;
 }): ChatCompletionMessageParam[] {
-  const { perFileFindings, summary, consolidatedFindings, maxFindings, refs } =
-    params;
+  const {
+    perFileFindings,
+    summary,
+    consolidatedFindings,
+    maxFindings,
+    refs,
+    profile = DEFAULT_PROMPT_PROFILE,
+  } = params;
   const findingsText = perFileFindings
     .map((f) => `### ${f.path}\n${f.findings}`)
     .join("\n\n");
@@ -278,7 +329,7 @@ export function buildVerificationPrompt(params: {
   return [
     {
       role: "system" as const,
-      content: buildVerificationSystemLines(maxFindings).join("\n"),
+      content: getVerificationSystemLines(profile, maxFindings).join("\n"),
     },
     {
       role: "user" as const,

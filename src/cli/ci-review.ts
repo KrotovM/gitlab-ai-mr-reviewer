@@ -10,12 +10,16 @@ import {
   buildPrompt,
   buildTriagePrompt,
   buildVerificationPrompt,
+  DEFAULT_PROMPT_PROFILE,
   extractCompletionText,
+  isEmptyReviewBody,
+  NO_FINDINGS_SENTENCE,
   parseTriageResponseDetailed,
   parseTriageResponse,
-  type TriageParseFailureReason,
   type PromptLimits,
+  type PromptProfile,
   type TriageFileInput,
+  type TriageParseFailureReason,
 } from "../prompt/index.js";
 import {
   fetchFileAtRef,
@@ -245,6 +249,7 @@ export async function reviewMergeRequestWithTools(params: {
   projectId: string;
   headers: Record<string, string>;
   forceTools: boolean;
+  promptProfile?: PromptProfile;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -259,6 +264,7 @@ export async function reviewMergeRequestWithTools(params: {
     projectId,
     headers,
     forceTools,
+    promptProfile = DEFAULT_PROMPT_PROFILE,
     loggers,
     debugDumpFile,
     debugRecordWriter,
@@ -272,6 +278,7 @@ export async function reviewMergeRequestWithTools(params: {
     changes: changes.map((change) => ({ diff: change.diff })),
     limits: promptLimits,
     allowTools: true,
+    profile: promptProfile,
   });
   messages.push({
     role: "user",
@@ -446,6 +453,7 @@ async function runFileReviewWithTools(params: {
   projectId: string;
   headers: Record<string, string>;
   forceTools: boolean;
+  promptProfile: PromptProfile;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -462,6 +470,7 @@ async function runFileReviewWithTools(params: {
     projectId,
     headers,
     forceTools,
+    promptProfile,
     loggers,
     debugDumpFile,
     debugRecordWriter,
@@ -474,6 +483,7 @@ async function runFileReviewWithTools(params: {
     summary,
     otherChangedFiles,
     allowTools: true,
+    profile: promptProfile,
   });
 
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
@@ -540,14 +550,14 @@ async function runFileReviewWithTools(params: {
     });
     const msg = completion.choices[0]?.message;
     if (msg == null)
-      return extractCompletionText(completion) ?? "No issues found.";
+      return extractCompletionText(completion) ?? NO_FINDINGS_SENTENCE;
 
     const toolCalls = msg.tool_calls ?? [];
     logDebug(
       `file-review path=${filePath} round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
     );
     if (toolCalls.length === 0)
-      return extractCompletionText(completion) ?? "No issues found.";
+      return extractCompletionText(completion) ?? NO_FINDINGS_SENTENCE;
 
     messages.push({
       role: "assistant",
@@ -627,7 +637,7 @@ async function runFileReviewWithTools(params: {
       messages,
     },
   });
-  return extractCompletionText(final) ?? "No issues found.";
+  return extractCompletionText(final) ?? NO_FINDINGS_SENTENCE;
 }
 
 function draftHasStructuredFindings(consolidatedText: string): boolean {
@@ -829,6 +839,7 @@ export async function reviewMergeRequestMultiPass(params: {
   maxFindings: number;
   reviewConcurrency: number;
   forceTools: boolean;
+  promptProfile?: PromptProfile;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -845,13 +856,16 @@ export async function reviewMergeRequestMultiPass(params: {
     maxFindings,
     reviewConcurrency,
     forceTools,
+    promptProfile = DEFAULT_PROMPT_PROFILE,
     loggers,
     debugDumpFile,
     debugRecordWriter,
   } = params;
   const { logStep } = loggers;
 
-  logStep(`Pass 1/4: triaging ${changes.length} file(s)`);
+  logStep(
+    `Pass 1/4: triaging ${changes.length} file(s) (prompt profile=${promptProfile})`,
+  );
   const triageInputs: TriageFileInput[] = changes.map((c) => ({
     path: c.new_path,
     new_file: c.new_file,
@@ -859,7 +873,7 @@ export async function reviewMergeRequestMultiPass(params: {
     renamed_file: c.renamed_file,
     diff: c.diff,
   }));
-  const triageMessages = buildTriagePrompt(triageInputs);
+  const triageMessages = buildTriagePrompt(triageInputs, promptProfile);
   let triageResult: ReturnType<typeof parseTriageResponse> = null;
   let triageText: string | null = null;
   let triageParseReason: TriageParseFailureReason | null = null;
@@ -918,6 +932,7 @@ export async function reviewMergeRequestMultiPass(params: {
       projectId,
       headers,
       forceTools,
+      promptProfile,
       loggers,
       debugDumpFile,
       debugRecordWriter,
@@ -961,6 +976,7 @@ export async function reviewMergeRequestMultiPass(params: {
         projectId,
         headers,
         forceTools,
+        promptProfile,
         loggers,
         debugDumpFile,
         debugRecordWriter,
@@ -974,10 +990,11 @@ export async function reviewMergeRequestMultiPass(params: {
     perFileFindings,
     summary: triageResult.summary,
     maxFindings,
+    profile: promptProfile,
   });
   if (consolidateMessages == null) {
     const DISCLAIMER = "This comment was generated by AI review bot.";
-    return `No confirmed bugs or high-value optimizations found.\n\n---\n_${DISCLAIMER}_`;
+    return `${NO_FINDINGS_SENTENCE}\n\n---\n_${DISCLAIMER}_`;
   }
   try {
     const consolidateCompletion = await createCompletionWithDebug({
@@ -1004,6 +1021,7 @@ export async function reviewMergeRequestMultiPass(params: {
       consolidatedFindings: consolidatedText,
       maxFindings,
       refs,
+      profile: promptProfile,
     });
     try {
       const verificationCompletion = await runVerificationWithTools({
@@ -1033,13 +1051,9 @@ export async function reviewMergeRequestMultiPass(params: {
     );
     const DISCLAIMER = "This comment was generated by AI review bot.";
     const raw = perFileFindings
-      .filter(
-        (f) =>
-          !f.findings.includes("No issues found.") &&
-          !f.findings.includes("No confirmed bugs"),
-      )
+      .filter((f) => !isEmptyReviewBody(f.findings))
       .map((f) => f.findings)
       .join("\n");
-    return `${raw || "No confirmed bugs or high-value optimizations found."}\n\n---\n_${DISCLAIMER}_`;
+    return `${raw || NO_FINDINGS_SENTENCE}\n\n---\n_${DISCLAIMER}_`;
   }
 }

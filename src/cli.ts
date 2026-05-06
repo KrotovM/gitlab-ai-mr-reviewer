@@ -18,6 +18,7 @@ import {
   parseIgnoreExtensions,
   parseNumberFlag,
   parsePromptLimits,
+  readPromptProfileFromEnv,
   requireEnvs,
 } from "./cli/args.js";
 import { reviewMergeRequestMultiPass } from "./cli/ci-review.js";
@@ -53,6 +54,9 @@ function printHelp(): void {
       "  OPENAI_API_KEY (required)  OpenAI API key.",
       "  OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.",
       "  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.",
+      "  AI_PROMPT_PROFILE (optional)  Prompt style: \"default\" | \"weak\". Default: default.",
+      "                              Use \"weak\" for small/quantized models — shorter prompts,",
+      "                              positive rules, and few-shot examples.",
       "  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (required for most private repos; should have api scope).",
       "",
       "CI-only env vars (provided by GitLab):",
@@ -113,6 +117,8 @@ async function main(): Promise<void> {
     1,
   );
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
+  const promptProfile = readPromptProfileFromEnv();
+  logStep(`Prompt profile: ${promptProfile}`);
   const artifactHtmlFile = INCLUDE_ARTIFACTS
     ? envOrDefault("AI_REVIEW_ARTIFACT_HTML_FILE", "ai-review-report.html")
     : undefined;
@@ -122,6 +128,7 @@ async function main(): Promise<void> {
         artifactRecords.push(record as Record<string, any>);
       }
     : undefined;
+  let artifactWritten = false;
 
   const loggers = { logStep, logDebug };
 
@@ -144,70 +151,86 @@ async function main(): Promise<void> {
   if (projectAccessToken != null) headers["PRIVATE-TOKEN"] = projectAccessToken;
   else headers["JOB-TOKEN"] = envs["CI_JOB_TOKEN"]!;
 
-  logStep("Fetching merge request changes");
-  const mrChanges = await fetchMergeRequestChanges({
-    gitLabBaseUrl: new URL(ciApiV4Url),
-    headers,
-    projectId,
-    mergeRequestIid,
-  });
-  if (mrChanges instanceof Error) throw mrChanges;
-
-  const filteredChanges = (mrChanges.changes ?? []).filter(
-    (change) =>
-      ignoredExtensions.length === 0 ||
-      (!hasIgnoredExtension(change.new_path, ignoredExtensions) &&
-        !hasIgnoredExtension(change.old_path, ignoredExtensions)),
-  );
-
-  if (filteredChanges.length === 0) {
-    process.stdout.write(
-      "No changes found in merge request. Skipping review.\n",
-    );
-    return;
-  }
-
-  logStep(`Requesting AI review with model: ${aiModel} (multi-pass pipeline)`);
-  const answer = await reviewMergeRequestMultiPass({
-    openaiInstance: new OpenAI({ apiKey: openaiApiKey }),
-    aiModel,
-    promptLimits,
-    changes: filteredChanges,
-    refs: {
-      base: mrChanges.diff_refs?.base_sha ?? "HEAD",
-      head: mrChanges.diff_refs?.head_sha ?? "HEAD",
-    },
-    gitLabProjectApiUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
-    projectId,
-    headers,
-    maxFindings,
-    reviewConcurrency,
-    forceTools: FORCE_TOOLS,
-    loggers,
-    debugRecordWriter,
-  });
-
-  logStep("Posting AI review note to merge request");
-  const noteRes = await postMergeRequestNote(
-    {
-      gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+  try {
+    logStep("Fetching merge request changes");
+    const mrChanges = await fetchMergeRequestChanges({
+      gitLabBaseUrl: new URL(ciApiV4Url),
       headers,
+      projectId,
       mergeRequestIid,
-    },
-    { body: answer },
-  );
-  if (noteRes instanceof Error) throw noteRes;
-
-  if (INCLUDE_ARTIFACTS && artifactHtmlFile != null) {
-    await renderDebugArtifactsHtml({
-      records: artifactRecords,
-      artifactHtmlFile,
-      cliVersion,
-      aiModel,
     });
-  }
+    if (mrChanges instanceof Error) throw mrChanges;
 
-  process.stdout.write("Posted AI review comment to merge request.\n");
+    const filteredChanges = (mrChanges.changes ?? []).filter(
+      (change) =>
+        ignoredExtensions.length === 0 ||
+        (!hasIgnoredExtension(change.new_path, ignoredExtensions) &&
+          !hasIgnoredExtension(change.old_path, ignoredExtensions)),
+    );
+
+    if (filteredChanges.length === 0) {
+      process.stdout.write(
+        "No changes found in merge request. Skipping review.\n",
+      );
+      return;
+    }
+
+    logStep(
+      `Requesting AI review with model: ${aiModel} (multi-pass pipeline)`,
+    );
+    const answer = await reviewMergeRequestMultiPass({
+      openaiInstance: new OpenAI({ apiKey: openaiApiKey }),
+      aiModel,
+      promptLimits,
+      changes: filteredChanges,
+      refs: {
+        base: mrChanges.diff_refs?.base_sha ?? "HEAD",
+        head: mrChanges.diff_refs?.head_sha ?? "HEAD",
+      },
+      gitLabProjectApiUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+      projectId,
+      headers,
+      maxFindings,
+      reviewConcurrency,
+      forceTools: FORCE_TOOLS,
+      promptProfile,
+      loggers,
+      debugRecordWriter,
+    });
+
+    logStep("Posting AI review note to merge request");
+    const noteRes = await postMergeRequestNote(
+      {
+        gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+        headers,
+        mergeRequestIid,
+      },
+      { body: answer },
+    );
+    if (noteRes instanceof Error) throw noteRes;
+
+    process.stdout.write("Posted AI review comment to merge request.\n");
+  } finally {
+    if (INCLUDE_ARTIFACTS && artifactHtmlFile != null && !artifactWritten) {
+      try {
+        await renderDebugArtifactsHtml({
+          records: artifactRecords,
+          artifactHtmlFile,
+          cliVersion,
+          aiModel,
+        });
+        artifactWritten = true;
+      } catch (artifactError: any) {
+        const message =
+          artifactError instanceof Error
+            ? artifactError.message
+            : String(artifactError);
+        process.stderr.write(
+          `Failed to write debug artifact "${artifactHtmlFile}": ${message}\n`,
+        );
+      }
+    }
+  }
 }
 
 main().catch((err) => {
