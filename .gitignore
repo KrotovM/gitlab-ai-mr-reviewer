@@ -57,6 +57,7 @@ profile-*
 profile*
 *clinic*
 *flamegraph*
+!src/prompt/profile.ts
 
 # generated code
 examples/typescript-server.js
