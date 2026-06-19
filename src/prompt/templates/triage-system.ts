@@ -9,7 +9,9 @@ const DEFAULT_LINES: string[] = [
   "Also produce a concise summary (2-4 sentences) of the entire merge request: what it does and which areas it touches.",
   "",
   "Respond with a JSON object (no markdown fences, no prose before or after) in this exact schema:",
-  '{ "summary": "<MR summary>", "files": [{ "path": "<file path>", "verdict": "NEEDS_REVIEW" | "SKIP" }] }',
+  '{ "summary": "<MR summary>", "files": [{ "path": "<file path>", "verdict": "NEEDS_REVIEW" | "SKIP", "reason": "<one short sentence explaining the verdict>" }] }',
+  "",
+  "The reason field is required for every file — cite what you saw in the diff (e.g. \"import reordering only\" or \"changes Input props and validation\").",
   "",
   "Rules:",
   "- When in doubt, verdict is NEEDS_REVIEW.",
@@ -23,14 +25,14 @@ const DEFAULT_LINES: string[] = [
   "- Config/CI/docs files are SKIP unless they modify build targets, env vars, or secrets.",
   "",
   "Example output (copy this style exactly — single JSON object, no fences, no preamble):",
-  '{"summary":"Adds retry-with-backoff to the OpenAI client and updates the README badge.","files":[{"path":"src/openai/client.ts","verdict":"NEEDS_REVIEW"},{"path":"README.md","verdict":"SKIP"}]}',
+  '{"summary":"Adds retry-with-backoff to the OpenAI client and updates the README badge.","files":[{"path":"src/openai/client.ts","verdict":"NEEDS_REVIEW","reason":"adds retry loop and error handling in API client"},{"path":"README.md","verdict":"SKIP","reason":"badge URL change only"}]}',
 ];
 
 const WEAK_LINES: string[] = [
   "You triage merge-request files. Output one JSON object only — no prose, no markdown, no code fences, no preamble.",
   "",
   "Schema (use exactly these keys):",
-  '{"summary":"<2-3 sentences about the MR>","files":[{"path":"<file path>","verdict":"NEEDS_REVIEW" | "SKIP"}]}',
+  '{"summary":"<2-3 sentences about the MR>","files":[{"path":"<file path>","verdict":"NEEDS_REVIEW" | "SKIP","reason":"<one short sentence>"}]}',
   "",
   "Mark a file NEEDS_REVIEW when ANY of these is true:",
   "- the diff adds or removes non-comment lines,",
@@ -43,7 +45,7 @@ const WEAK_LINES: string[] = [
   "When in doubt, choose NEEDS_REVIEW.",
   "",
   "Example output (copy this exactly — one line, one JSON object, nothing else):",
-  '{"summary":"Adds retry-with-backoff to the OpenAI client and updates the README badge.","files":[{"path":"src/openai/client.ts","verdict":"NEEDS_REVIEW"},{"path":"README.md","verdict":"SKIP"}]}',
+  '{"summary":"Adds retry-with-backoff to the OpenAI client and updates the README badge.","files":[{"path":"src/openai/client.ts","verdict":"NEEDS_REVIEW","reason":"adds retry loop in API client"},{"path":"README.md","verdict":"SKIP","reason":"badge URL only"}]}',
 ];
 
 export function getTriageSystemLines(profile: PromptProfile): string[] {

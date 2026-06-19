@@ -63,6 +63,64 @@ export async function renderDebugArtifactsHtml(params: {
     }
   }
 
+  function renderTriageDecisions(): string {
+    const decisionRecord = records.find((r) => r.kind === "triage_decision");
+    if (decisionRecord == null) return "<pre>No triage decision record</pre>";
+
+    const summary =
+      typeof decisionRecord.summary === "string" ? decisionRecord.summary : "";
+    const skipAllOverride = decisionRecord.skip_all_override === true;
+    const triageDiffChars = Number(decisionRecord.triage_diff_chars ?? 0);
+    const files = Array.isArray(decisionRecord.files) ? decisionRecord.files : [];
+
+    const actionLabel = (action: unknown): string => {
+      switch (action) {
+        case "skipped":
+          return "Skipped";
+        case "reviewed_via_override":
+          return "Reviewed (override)";
+        case "review":
+          return "Review";
+        default:
+          return String(action ?? "unknown");
+      }
+    };
+
+    const rows = files
+      .map((file: Record<string, unknown>) => {
+        const path = typeof file.path === "string" ? file.path : "?";
+        const verdict = typeof file.verdict === "string" ? file.verdict : "?";
+        const reason = typeof file.reason === "string" ? file.reason : "";
+        const action = actionLabel(file.review_action);
+        return `<tr>
+          <td><code>${escapeHtml(path)}</code></td>
+          <td>${escapeHtml(verdict)}</td>
+          <td>${escapeHtml(action)}</td>
+          <td>${escapeHtml(reason)}</td>
+        </tr>`;
+      })
+      .join("\n");
+
+    const overrideNote = skipAllOverride
+      ? `<p class="tokens" style="margin:0 0 10px;color:var(--med);">All files were marked SKIP — pipeline overrode and reviewed every file.</p>`
+      : "";
+
+    return `${overrideNote}
+      <p class="tokens" style="margin:0 0 10px;">triage_diff_chars=${escapeHtml(String(triageDiffChars))}</p>
+      <p style="margin:0 0 12px;">${escapeHtml(summary)}</p>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="text-align:left;color:var(--muted);">
+            <th style="padding:6px 8px;border-bottom:1px solid var(--line);">File</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Verdict</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Action</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Reason</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
   function renderFindings(markdown: string): string {
     const trimmed = markdown.trim();
     if (trimmed === "") return "<pre>No data</pre>";
@@ -165,7 +223,12 @@ export async function renderDebugArtifactsHtml(params: {
       <div class="tokens" style="margin-top:6px;"><strong>Total:</strong> ${escapeHtml(totalTokens.toLocaleString())} tokens</div>
     </div>
 
-    <h2>Pass 1 — Triage</h2>
+    <h2>Pass 1 — Triage Decisions</h2>
+    <div class="section">
+      ${renderTriageDecisions()}
+    </div>
+
+    <h2>Pass 1 — Triage (raw model output)</h2>
     <div class="section">
       <div class="row"><span class="badge">label: triage_pass</span><span class="tokens">${escapeHtml(findTs("triage_pass"))}</span></div>
       <pre>${escapeHtml(triageContentPretty)}</pre>

@@ -1,5 +1,7 @@
 /** @format */
 
+import { truncateWithMarker } from "../utils.js";
+
 type TriageFileInputTemplate = {
   path: string;
   new_file?: boolean;
@@ -25,16 +27,18 @@ export function buildMainReviewUserContent(params: {
   ].join("\n");
 }
 
-export function buildTriageUserContent(changes: TriageFileInputTemplate[]): string {
+export function buildTriageUserContent(
+  changes: TriageFileInputTemplate[],
+  maxDiffChars: number,
+): string {
   const fileEntries = changes.map((c) => {
     const flags: string[] = [];
     if (c.new_file) flags.push("new");
     if (c.deleted_file) flags.push("deleted");
     if (c.renamed_file) flags.push("renamed");
     const flagStr = flags.length > 0 ? ` [${flags.join(", ")}]` : "";
-    const snippet = c.diff.slice(0, 300);
-    const truncNote = c.diff.length > 300 ? "..." : "";
-    return `### ${c.path}${flagStr}\n\`\`\`\n${snippet}${truncNote}\n\`\`\``;
+    const snippet = truncateWithMarker(c.diff, maxDiffChars, c.path);
+    return `### ${c.path}${flagStr}\n\`\`\`diff\n${snippet}\n\`\`\``;
   });
   return `Triage these ${changes.length} file(s):\n\n${fileEntries.join("\n\n")}`;
 }

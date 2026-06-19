@@ -75,6 +75,7 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--max-diffs=50` - Max number of diffs included in the prompt.
 - `--max-diff-chars=16000` - Max chars per diff chunk (single-pass fallback only).
 - `--max-total-prompt-chars=220000` - Final hard cap for prompt size (single-pass fallback only).
+- `--triage-diff-chars=2000` - Max chars per file diff sent to the triage pass (Pass 1). Increase for large diffs where the first hunks are mostly git headers.
 - `--max-findings=5` - Max findings in the final review (CI multi-pass only).
 - `--max-review-concurrency=5` - Parallel per-file review API calls (CI multi-pass only).
 - `--debug` - Print full error details (stack and API error fields).
@@ -85,8 +86,8 @@ GitLab provides these automatically in Merge Request pipelines:
 
 The reviewer uses a three-pass pipeline optimized for large merge requests:
 
-1. **Triage** - A fast LLM pass classifies each changed file as `NEEDS_REVIEW` or `SKIP` and generates a short MR summary.
-2. **Per-file review** - Only `NEEDS_REVIEW` files are reviewed, each in a dedicated LLM call running in parallel (with tools to fetch full files or grep the repository).
+1. **Triage** - A fast LLM pass classifies each changed file as `NEEDS_REVIEW` or `SKIP`, with a per-file `reason`, and generates a short MR summary. Each file diff is truncated to `--triage-diff-chars` (default 2000).
+2. **Per-file review** - Only `NEEDS_REVIEW` files are reviewed (if triage marks every file `SKIP`, all files are reviewed anyway). Each reviewed file gets a dedicated LLM call running in parallel (with tools to fetch full files or grep the repository).
 3. **Consolidate** - Per-file findings are merged, deduplicated, ranked by severity, and trimmed to top N (default 5).
 
 If the triage pass fails (API error, unparseable response), the pipeline falls back to the original single-pass approach automatically.
