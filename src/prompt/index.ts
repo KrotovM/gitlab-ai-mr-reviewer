@@ -49,6 +49,9 @@ export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
   maxTotalPromptChars: 220000,
 };
 
+/** Max chars of each file diff sent to the triage pass (Pass 1). */
+export const DEFAULT_TRIAGE_DIFF_CHARS = 2000;
+
 export const AI_MODEL_TEMPERATURE = 0.2;
 export const AI_MAX_OUTPUT_TOKENS = 600;
 
@@ -132,9 +135,15 @@ export interface TriageFileInput {
   diff: string;
 }
 
+export interface TriageFileVerdict {
+  path: string;
+  verdict: "NEEDS_REVIEW" | "SKIP";
+  reason?: string;
+}
+
 export interface TriageResult {
   summary: string;
-  files: Array<{ path: string; verdict: "NEEDS_REVIEW" | "SKIP" }>;
+  files: TriageFileVerdict[];
 }
 
 export type TriageParseFailureReason =
@@ -145,12 +154,13 @@ export type TriageParseFailureReason =
 export function buildTriagePrompt(
   changes: TriageFileInput[],
   profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
+  triageDiffChars: number = DEFAULT_TRIAGE_DIFF_CHARS,
 ): ChatCompletionMessageParam[] {
   return [
     buildTriageSystemMessage(profile),
     {
       role: "user",
-      content: buildTriageUserContent(changes),
+      content: buildTriageUserContent(changes, triageDiffChars),
     },
   ];
 }
@@ -214,7 +224,9 @@ export function parseTriageResponseDetailed(text: string): {
         summary: parsed.summary,
         files: parsed.files
           .filter(
-            (f: unknown): f is { path: string; verdict: string } =>
+            (
+              f: unknown,
+            ): f is { path: string; verdict: string; reason?: unknown } =>
               typeof f === "object" &&
               f != null &&
               typeof (f as { path?: unknown }).path === "string" &&
@@ -224,6 +236,9 @@ export function parseTriageResponseDetailed(text: string): {
           .map((f) => ({
             path: f.path,
             verdict: f.verdict as "NEEDS_REVIEW" | "SKIP",
+            ...(typeof f.reason === "string" && f.reason.trim() !== ""
+              ? { reason: f.reason.trim() }
+              : {}),
           })),
       },
       reason: null,

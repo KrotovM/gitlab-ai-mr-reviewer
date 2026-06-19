@@ -20,6 +20,7 @@ import {
   type PromptProfile,
   type TriageFileInput,
   type TriageParseFailureReason,
+  type TriageFileVerdict,
 } from "../prompt/index.js";
 import {
   fetchFileAtRef,
@@ -40,6 +41,65 @@ type LoggerFns = {
   logDebug: (message: string) => void;
 };
 type DebugRecordWriter = (record: Record<string, unknown>) => Promise<void> | void;
+
+type TriageReviewAction = "review" | "skipped" | "reviewed_via_override";
+
+type TriageFileDecision = TriageFileVerdict & {
+  review_action: TriageReviewAction;
+};
+
+function buildTriageDecisions(params: {
+  changes: MergeRequestChange[];
+  triageResult: { summary: string; files: TriageFileVerdict[] };
+}): { decisions: TriageFileDecision[]; skipAllOverride: boolean; reviewFiles: MergeRequestChange[] } {
+  const { changes, triageResult } = params;
+  const triageMap = new Map(triageResult.files.map((f) => [f.path, f]));
+  let reviewFiles = changes.filter(
+    (c) => triageMap.get(c.new_path)?.verdict !== "SKIP",
+  );
+  const skipAllOverride = reviewFiles.length === 0;
+  if (skipAllOverride) reviewFiles = changes;
+
+  const decisions: TriageFileDecision[] = changes.map((change) => {
+    const path = change.new_path;
+    const triageFile = triageMap.get(path);
+    const verdict = triageFile?.verdict ?? "NEEDS_REVIEW";
+    const reason =
+      triageFile?.reason ??
+      (triageFile == null ? "not listed in triage response" : undefined);
+    let review_action: TriageReviewAction;
+    if (verdict === "NEEDS_REVIEW" || triageFile == null) {
+      review_action = "review";
+    } else if (skipAllOverride) {
+      review_action = "reviewed_via_override";
+    } else {
+      review_action = "skipped";
+    }
+    return {
+      path,
+      verdict,
+      ...(reason != null ? { reason } : {}),
+      review_action,
+    };
+  });
+
+  return { decisions, skipAllOverride, reviewFiles };
+}
+
+function formatTriageDecisionLine(decision: TriageFileDecision): string {
+  const reasonSuffix =
+    decision.reason != null && decision.reason !== ""
+      ? ` — ${decision.reason}`
+      : "";
+  switch (decision.review_action) {
+    case "skipped":
+      return `  Skipped: ${decision.path} (${decision.verdict})${reasonSuffix}`;
+    case "reviewed_via_override":
+      return `  Reviewed via override: ${decision.path} (triage=${decision.verdict})${reasonSuffix}`;
+    default:
+      return `  Review: ${decision.path} (${decision.verdict})${reasonSuffix}`;
+  }
+}
 
 async function appendDebugDump(
   _debugDumpFile: string | undefined,
@@ -831,6 +891,7 @@ export async function reviewMergeRequestMultiPass(params: {
   openaiInstance: OpenAI;
   aiModel: ChatModel;
   promptLimits: PromptLimits;
+  triageDiffChars: number;
   changes: MergeRequestChange[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
@@ -848,6 +909,7 @@ export async function reviewMergeRequestMultiPass(params: {
     openaiInstance,
     aiModel,
     promptLimits,
+    triageDiffChars,
     changes,
     refs,
     gitLabProjectApiUrl,
@@ -864,7 +926,8 @@ export async function reviewMergeRequestMultiPass(params: {
   const { logStep } = loggers;
 
   logStep(
-    `Pass 1/4: triaging ${changes.length} file(s) (prompt profile=${promptProfile})`,
+    `Pass 1/4: triaging ${changes.length} file(s) ` +
+      `(prompt profile=${promptProfile}, triage_diff_chars=${triageDiffChars})`,
   );
   const triageInputs: TriageFileInput[] = changes.map((c) => ({
     path: c.new_path,
@@ -873,7 +936,11 @@ export async function reviewMergeRequestMultiPass(params: {
     renamed_file: c.renamed_file,
     diff: c.diff,
   }));
-  const triageMessages = buildTriagePrompt(triageInputs, promptProfile);
+  const triageMessages = buildTriagePrompt(
+    triageInputs,
+    promptProfile,
+    triageDiffChars,
+  );
   let triageResult: ReturnType<typeof parseTriageResponse> = null;
   let triageText: string | null = null;
   let triageParseReason: TriageParseFailureReason | null = null;
@@ -939,20 +1006,32 @@ export async function reviewMergeRequestMultiPass(params: {
     });
   }
 
-  const triageMap = new Map(triageResult.files.map((f) => [f.path, f.verdict]));
-  let reviewFiles = changes.filter(
-    (c) => triageMap.get(c.new_path) !== "SKIP",
-  );
-  const skippedCount = changes.length - reviewFiles.length;
-  if (reviewFiles.length === 0) {
+  const { decisions, skipAllOverride, reviewFiles } = buildTriageDecisions({
+    changes,
+    triageResult,
+  });
+  const skippedCount = decisions.filter((d) => d.review_action === "skipped").length;
+
+  await appendDebugDump(debugDumpFile, debugRecordWriter, {
+    kind: "triage_decision",
+    summary: triageResult.summary,
+    skip_all_override: skipAllOverride,
+    triage_diff_chars: triageDiffChars,
+    files: decisions,
+  });
+
+  if (skipAllOverride) {
     logStep(
       `Triage wanted to skip all ${changes.length} file(s) — overriding to review all. Summary: ${triageResult.summary.slice(0, 120)}...`,
     );
-    reviewFiles = changes;
   } else {
     logStep(
       `Triage: ${reviewFiles.length} file(s) to review, ${skippedCount} skipped. Summary: ${triageResult.summary.slice(0, 120)}...`,
     );
+  }
+  for (const decision of decisions) {
+    if (decision.review_action === "review") continue;
+    logStep(formatTriageDecisionLine(decision));
   }
 
   logStep(

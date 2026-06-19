@@ -18,6 +18,7 @@ import {
   parseIgnoreExtensions,
   parseNumberFlag,
   parsePromptLimits,
+  parseTriageDiffChars,
   readPromptProfileFromEnv,
   requireEnvs,
 } from "./cli/args.js";
@@ -47,6 +48,7 @@ function printHelp(): void {
       "  --max-diffs=50",
       "  --max-diff-chars=16000",
       "  --max-total-prompt-chars=220000",
+      "  --triage-diff-chars=2000   Max chars per file diff in triage pass (Pass 1).",
       "  --max-findings=5          Max findings in final review (CI multi-pass only).",
       "  --max-review-concurrency=5  Parallel per-file review calls (CI multi-pass only).",
       "",
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
   logStep(`gitlab-ai-review v${cliVersion}`);
   const ignoredExtensions = parseIgnoreExtensions(process.argv);
   const promptLimits = parsePromptLimits(process.argv);
+  const triageDiffChars = parseTriageDiffChars(process.argv);
   const maxFindings = parseNumberFlag(
     process.argv,
     "max-findings",
@@ -182,6 +185,7 @@ async function main(): Promise<void> {
       openaiInstance: new OpenAI({ apiKey: openaiApiKey }),
       aiModel,
       promptLimits,
+      triageDiffChars,
       changes: filteredChanges,
       refs: {
         base: mrChanges.diff_refs?.base_sha ?? "HEAD",

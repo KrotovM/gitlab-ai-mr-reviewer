@@ -2,6 +2,7 @@
 
 import {
   DEFAULT_PROMPT_LIMITS,
+  DEFAULT_TRIAGE_DIFF_CHARS,
   parsePromptProfile as parsePromptProfileValue,
   type PromptLimits,
   type PromptProfile,
@@ -126,6 +127,15 @@ export function parsePromptLimits(argv: string[]): PromptLimits {
   };
 }
 
+export function parseTriageDiffChars(argv: string[]): number {
+  return parseNumberFlag(
+    argv,
+    "triage-diff-chars",
+    DEFAULT_TRIAGE_DIFF_CHARS,
+    1,
+  );
+}
+
 export function hasIgnoredExtension(
   filePath: string,
   ignoredExtensions: readonly string[],
@@ -139,4 +149,3 @@ export function hasIgnoredExtension(
 export function readPromptProfileFromEnv(): PromptProfile {
   return parsePromptProfileValue(process.env["AI_PROMPT_PROFILE"]);
 }
-
