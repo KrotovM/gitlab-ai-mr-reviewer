@@ -59,6 +59,8 @@ function printHelp(): void {
       "  AI_PROMPT_PROFILE (optional)  Prompt style: \"default\" | \"weak\". Default: default.",
       "                              Use \"weak\" for small/quantized models — shorter prompts,",
       "                              positive rules, and few-shot examples.",
+      "                              When unset, an unparseable triage response auto-retries",
+      "                              with \"weak\" and keeps it for the whole run.",
       "  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (required for most private repos; should have api scope).",
       "",
       "CI-only env vars (provided by GitLab):",
@@ -121,7 +123,10 @@ async function main(): Promise<void> {
   );
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
   const promptProfile = readPromptProfileFromEnv();
-  logStep(`Prompt profile: ${promptProfile}`);
+  const allowProfileAutoDemote = envOrUndefined("AI_PROMPT_PROFILE") == null;
+  logStep(
+    `Prompt profile: ${promptProfile}${allowProfileAutoDemote ? " (auto: falls back to weak if triage JSON fails)" : ""}`,
+  );
   const artifactHtmlFile = INCLUDE_ARTIFACTS
     ? envOrDefault("AI_REVIEW_ARTIFACT_HTML_FILE", "ai-review-report.html")
     : undefined;
@@ -198,6 +203,7 @@ async function main(): Promise<void> {
       reviewConcurrency,
       forceTools: FORCE_TOOLS,
       promptProfile,
+      allowProfileAutoDemote,
       loggers,
       debugRecordWriter,
     });
