@@ -56,6 +56,7 @@ function printHelp(): void {
       "  OPENAI_API_KEY (required)  OpenAI API key.",
       "  OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.",
       "  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.",
+      "  AI_REVIEW_CONCURRENCY (optional)  Same as --max-review-concurrency; the flag wins.",
       "  AI_PROMPT_PROFILE (optional)  Prompt style: \"default\" | \"weak\". Default: default.",
       "                              Use \"weak\" for small/quantized models — shorter prompts,",
       "                              positive rules, and few-shot examples.",
@@ -115,10 +116,13 @@ async function main(): Promise<void> {
     DEFAULT_MAX_FINDINGS,
     1,
   );
+  const envConcurrency = Number(envOrUndefined("AI_REVIEW_CONCURRENCY"));
   const reviewConcurrency = parseNumberFlag(
     process.argv,
     "max-review-concurrency",
-    DEFAULT_REVIEW_CONCURRENCY,
+    Number.isFinite(envConcurrency) && envConcurrency >= 1
+      ? Math.floor(envConcurrency)
+      : DEFAULT_REVIEW_CONCURRENCY,
     1,
   );
   const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
