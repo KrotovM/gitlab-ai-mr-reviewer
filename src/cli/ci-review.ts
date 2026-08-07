@@ -126,8 +126,13 @@ async function createCompletionWithDebug(params: {
     label: requestLabel,
     request,
   });
+  // Stream and reassemble: reverse proxies (nginx proxy_read_timeout) return 504 on
+  // long silent non-streamed completions; streamed chunks keep the connection alive.
+  const { stream: _stream, ...createParams } = request;
   try {
-    const completion = await openaiInstance.chat.completions.create(request);
+    const completion = await openaiInstance.chat.completions
+      .stream(createParams)
+      .finalChatCompletion();
     await appendDebugDump(debugDumpFile, debugRecordWriter, {
       kind: "openai_response",
       label: requestLabel,
@@ -1038,31 +1043,51 @@ export async function reviewMergeRequestMultiPass(params: {
     `Pass 2/4: reviewing ${reviewFiles.length} file(s) (concurrency=${reviewConcurrency})`,
   );
   const allChangedPaths = changes.map((c) => c.new_path);
+  const failedPaths: string[] = [];
   const perFileFindings = await mapWithConcurrency(
     reviewFiles,
     reviewConcurrency,
     async (change) => {
       const otherFiles = allChangedPaths.filter((p) => p !== change.new_path);
-      const findings = await runFileReviewWithTools({
-        openaiInstance,
-        aiModel,
-        filePath: change.new_path,
-        fileDiff: change.diff,
-        summary: triageResult!.summary,
-        otherChangedFiles: otherFiles,
-        refs,
-        gitLabProjectApiUrl,
-        projectId,
-        headers,
-        forceTools,
-        promptProfile,
-        loggers,
-        debugDumpFile,
-        debugRecordWriter,
-      });
+      let findings: string;
+      try {
+        findings = await runFileReviewWithTools({
+          openaiInstance,
+          aiModel,
+          filePath: change.new_path,
+          fileDiff: change.diff,
+          summary: triageResult!.summary,
+          otherChangedFiles: otherFiles,
+          refs,
+          gitLabProjectApiUrl,
+          projectId,
+          headers,
+          forceTools,
+          promptProfile,
+          loggers,
+          debugDumpFile,
+          debugRecordWriter,
+        });
+      } catch (error: any) {
+        const preview = String(error?.message ?? error)
+          .replace(/\s+/g, " ")
+          .slice(0, 200);
+        logStep(
+          `Pass 2: review failed for ${change.new_path}: ${preview}. Continuing with remaining files.`,
+        );
+        failedPaths.push(change.new_path);
+        // ponytail: failed file surfaces as "no findings" in the MR comment;
+        // thread failedPaths into the consolidate prompt if that ever matters.
+        findings = NO_FINDINGS_SENTENCE;
+      }
       return { path: change.new_path, findings };
     },
   );
+  if (failedPaths.length === reviewFiles.length) {
+    throw new Error(
+      `All ${reviewFiles.length} per-file reviews failed (e.g. ${failedPaths[0]}). See log above.`,
+    );
+  }
 
   logStep("Pass 3/4: consolidating findings");
   const consolidateMessages = buildConsolidatePrompt({
