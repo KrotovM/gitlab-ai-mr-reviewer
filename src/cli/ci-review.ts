@@ -27,6 +27,7 @@ import {
   searchRepository,
   type MergeRequestChange,
 } from "../gitlab/services.js";
+import { truncateWithMarker } from "../prompt/utils.js";
 import {
   logToolUsageMinimal,
   MAX_FILE_TOOL_ROUNDS,
@@ -39,6 +40,11 @@ import {
 /** Hard deadline per model call, retries included. Must exceed the gateway's own
  *  proxy timeout so the SDK's 5xx retries stay the first line of defense. */
 const COMPLETION_TIMEOUT_MS = 180_000;
+
+/** Tool-result caps. Every tool response is re-sent as prompt on each following
+ *  round, so oversized results multiply prefill time on self-hosted models. */
+const MAX_TOOL_FILE_CHARS = 12_000;
+const MAX_TOOL_GREP_CHARS = 800;
 
 type LoggerFns = {
   logStep: (message: string) => void;
@@ -233,8 +239,8 @@ async function handleGetFileTool(
       ok: true,
       path,
       ref,
-      content: fileText.slice(0, 30000),
-      truncated: fileText.length > 30000,
+      content: fileText.slice(0, MAX_TOOL_FILE_CHARS),
+      truncated: fileText.length > MAX_TOOL_FILE_CHARS,
     });
   } catch (error: any) {
     return JSON.stringify({
@@ -276,7 +282,7 @@ async function handleGrepTool(
     const trimmed = results.map((r) => ({
       path: r.path,
       startline: r.startline,
-      data: r.data.slice(0, 2000),
+      data: r.data.slice(0, MAX_TOOL_GREP_CHARS),
     }));
     return JSON.stringify({ ok: true, query, ref, matches: trimmed });
   } catch (error: any) {
@@ -914,6 +920,9 @@ export async function reviewMergeRequestMultiPass(params: {
   reviewConcurrency: number;
   forceTools: boolean;
   promptProfile?: PromptProfile;
+  /** When AI_PROMPT_PROFILE is not set explicitly, a triage JSON parse failure
+   *  demotes the whole run to the "weak" profile (behavioral capability probe). */
+  allowProfileAutoDemote?: boolean;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -932,11 +941,13 @@ export async function reviewMergeRequestMultiPass(params: {
     reviewConcurrency,
     forceTools,
     promptProfile = DEFAULT_PROMPT_PROFILE,
+    allowProfileAutoDemote = false,
     loggers,
     debugDumpFile,
     debugRecordWriter,
   } = params;
   const { logStep } = loggers;
+  let effectiveProfile: PromptProfile = promptProfile;
 
   logStep(
     `Pass 1/4: triaging ${changes.length} file(s) ` +
@@ -985,6 +996,51 @@ export async function reviewMergeRequestMultiPass(params: {
     );
   }
 
+  // The triage pass doubles as a capability probe: models that cannot return the
+  // strict triage JSON with the default prompts follow the terser weak-profile
+  // prompts better. Retry triage once with "weak"; on success the remaining
+  // passes run with it. (Self-reported model names are unreliable behind
+  // gateway aliases, so we probe behavior instead of asking.)
+  if (
+    triageResult == null &&
+    triageText != null &&
+    effectiveProfile === "default" &&
+    allowProfileAutoDemote
+  ) {
+    logStep(
+      "Triage response unparseable with prompt profile=default. Retrying triage with profile=weak.",
+    );
+    try {
+      const weakTriageCompletion = await createCompletionWithDebug({
+        openaiInstance,
+        requestLabel: "triage_pass_weak_retry",
+        debugDumpFile,
+        debugRecordWriter,
+        request: {
+          model: aiModel,
+          temperature: 0.1,
+          stream: false,
+          messages: buildTriagePrompt(triageInputs, "weak", triageDiffChars),
+          response_format: { type: "json_object" },
+        },
+      });
+      const weakTriageText = extractCompletionText(weakTriageCompletion);
+      const weakParse =
+        weakTriageText != null
+          ? parseTriageResponseDetailed(weakTriageText)
+          : null;
+      if (weakParse?.result != null) {
+        triageResult = weakParse.result;
+        effectiveProfile = "weak";
+        logStep(
+          "Weak-profile triage parsed successfully. Continuing all passes with prompt profile=weak.",
+        );
+      }
+    } catch (error: any) {
+      logStep(`Weak-profile triage retry failed: ${error?.message ?? error}.`);
+    }
+  }
+
   if (triageResult == null) {
     if (triageText != null) {
       const triagePreview = triageText.replace(/\s+/g, " ").trim().slice(0, 200);
@@ -1012,7 +1068,7 @@ export async function reviewMergeRequestMultiPass(params: {
       projectId,
       headers,
       forceTools,
-      promptProfile,
+      promptProfile: effectiveProfile,
       loggers,
       debugDumpFile,
       debugRecordWriter,
@@ -1063,7 +1119,11 @@ export async function reviewMergeRequestMultiPass(params: {
           openaiInstance,
           aiModel,
           filePath: change.new_path,
-          fileDiff: change.diff,
+          fileDiff: truncateWithMarker(
+            change.diff,
+            promptLimits.maxDiffChars,
+            change.new_path,
+          ),
           summary: triageResult!.summary,
           otherChangedFiles: otherFiles,
           refs,
@@ -1071,7 +1131,7 @@ export async function reviewMergeRequestMultiPass(params: {
           projectId,
           headers,
           forceTools,
-          promptProfile,
+          promptProfile: effectiveProfile,
           loggers,
           debugDumpFile,
           debugRecordWriter,
@@ -1102,7 +1162,7 @@ export async function reviewMergeRequestMultiPass(params: {
     perFileFindings,
     summary: triageResult.summary,
     maxFindings,
-    profile: promptProfile,
+    profile: effectiveProfile,
   });
   if (consolidateMessages == null) {
     const DISCLAIMER = "This comment was generated by AI review bot.";
@@ -1133,7 +1193,7 @@ export async function reviewMergeRequestMultiPass(params: {
       consolidatedFindings: consolidatedText,
       maxFindings,
       refs,
-      profile: promptProfile,
+      profile: effectiveProfile,
     });
     try {
       const verificationCompletion = await runVerificationWithTools({

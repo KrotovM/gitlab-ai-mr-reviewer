@@ -21,6 +21,9 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          # v5 auto-enables pnpm cache from package.json's packageManager field,
+          # but pnpm only appears after "corepack enable" below.
+          package-manager-cache: false
 
       - name: Enable corepack (pnpm)
         run: corepack enable
