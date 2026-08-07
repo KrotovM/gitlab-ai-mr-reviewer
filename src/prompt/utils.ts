@@ -83,12 +83,19 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
   }> = [];
 
   const headerRe = /^\s*(?:[-*•]\s*)?\[(high|medium)\]\s+(.+?)\s*$/i;
+  // Already-rendered block (see renderer below) — parsing it too keeps this
+  // function idempotent when a model echoes pretty findings back verbatim.
+  const prettyHeaderRe =
+    /^\s*(?:[-*•]\s*)?\*\*(?:🔴|🟠)?\s*(high|medium)\s*[—–-]\s*(.+?)\*\*\s*$/i;
+  const matchHeader = (line: string) =>
+    line.match(headerRe) ?? line.match(prettyHeaderRe);
   const fileRe = /^\s*[-*]?\s*File:\s*(.+?)\s*$/i;
   const lineRe = /^\s*[-*]?\s*Line:\s*(.+?)\s*$/i;
   const whyRe = /^\s*[-*]?\s*Why:\s*(.+?)\s*$/i;
+  const prettyFileLineRe = /^\s*`([^`\n]+?):(~?[^`\n]*)`\s*$/;
 
   for (let i = 0; i < lines.length; i += 1) {
-    const headerMatch = lines[i]!.match(headerRe);
+    const headerMatch = matchHeader(lines[i]!);
     if (headerMatch == null) continue;
 
     const severity = headerMatch[1]!.toLowerCase() as "high" | "medium";
@@ -99,9 +106,18 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
 
     let j = i + 1;
     while (j < lines.length) {
-      const nextHeader = lines[j]!.match(headerRe);
+      const nextHeader = matchHeader(lines[j]!);
       if (nextHeader != null) break;
 
+      if (file == null && line == null) {
+        const m = lines[j]!.match(prettyFileLineRe);
+        if (m != null) {
+          file = m[1]!.trim();
+          line = m[2]!.trim();
+          j += 1;
+          continue;
+        }
+      }
       if (file == null) {
         const m = lines[j]!.match(fileRe);
         if (m != null) {
@@ -126,6 +142,15 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
           continue;
         }
       }
+      // Pretty blocks carry the why as an unlabeled line after `file:line`.
+      if (why == null && file != null && line != null) {
+        const text = lines[j]!.trim();
+        if (text !== "" && !/^(-{3,}|_)/.test(text)) {
+          why = text;
+          j += 1;
+          continue;
+        }
+      }
       j += 1;
     }
 
@@ -137,10 +162,14 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
 
   if (findings.length === 0) return normalized;
 
+  const severityLabel: Record<"high" | "medium", string> = {
+    high: "🔴 High",
+    medium: "🟠 Medium",
+  };
   return findings
     .map(
       (f) =>
-        `- [${f.severity}] ${f.title}  \n  File: ${f.file}  \n  Line: ${f.line}  \n  Why: ${f.why}`,
+        `- **${severityLabel[f.severity]} — ${f.title}**  \n  \`${f.file}:${f.line}\`  \n  ${f.why}`,
     )
     .join("\n\n");
 }
