@@ -2,7 +2,13 @@
 
 # AI Code Reviewer
 
+[![npm](https://img.shields.io/npm/v/@krotovm/gitlab-ai-review)](https://www.npmjs.com/package/@krotovm/gitlab-ai-review)
+[![downloads](https://img.shields.io/npm/dm/@krotovm/gitlab-ai-review)](https://www.npmjs.com/package/@krotovm/gitlab-ai-review)
+[![license](https://img.shields.io/npm/l/@krotovm/gitlab-ai-review)](https://github.com/KrotovM/gitlab-ai-mr-reviewer/blob/main/LICENSE)
+
 Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
+
+![AI review comment posted on a GitLab merge request](docs/review.png)
 
 ## Features
 
@@ -47,6 +53,10 @@ ai_review:
     paths:
       - ai-review-report.html
 ```
+
+The HTML artifact breaks the run down per pass — tokens, durations, triage decisions, per-file findings, and errors:
+
+![AI review debug report artifact](docs/report.png)
 
 ## Env variables
 
@@ -110,3 +120,7 @@ The reviewer uses a three-pass pipeline optimized for large merge requests:
 3. **Consolidate** - Per-file findings are merged, deduplicated, ranked by severity, and trimmed to top N (default 5).
 
 If the triage pass fails (API error, unparseable response), the pipeline falls back to the original single-pass approach automatically.
+
+The pipeline in a CI job log — triage, parallel tool-assisted file reviews, consolidation, verification:
+
+![Multi-pass pipeline in the CI job log](docs/job.png)
