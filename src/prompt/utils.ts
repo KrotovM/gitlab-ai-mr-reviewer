@@ -60,9 +60,18 @@ export function sanitizeGitLabMarkdown(input: string): string {
 const NO_ISSUES_SENTENCE =
   "No confirmed bugs or high-value optimizations found.";
 
-export function normalizeReviewFindingsMarkdown(input: string): string {
+export type ReviewFinding = {
+  severity: "high" | "medium";
+  title: string;
+  file: string;
+  line: string;
+  why: string;
+};
+
+/** Parse labeled (`- [high] … File:/Line:/Why:`) or pretty (`**🔴 High — …**`)
+ *  finding blocks out of arbitrary model output. Returns [] when none match. */
+export function parseReviewFindings(input: string): ReviewFinding[] {
   const normalized = input.replace(/\r\n/g, "\n").trim();
-  if (normalized === "" || normalized === NO_ISSUES_SENTENCE) return normalized;
 
   // Some providers collapse each finding into one long line.
   // Expand inline markers so parser can recover structured blocks.
@@ -74,13 +83,7 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
     .trim();
 
   const lines = expanded.split("\n");
-  const findings: Array<{
-    severity: "high" | "medium";
-    title: string;
-    file: string;
-    line: string;
-    why: string;
-  }> = [];
+  const findings: ReviewFinding[] = [];
 
   const headerRe = /^\s*(?:[-*•]\s*)?\[(high|medium)\]\s+(.+?)\s*$/i;
   // Already-rendered block (see renderer below) — parsing it too keeps this
@@ -160,6 +163,14 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
     }
   }
 
+  return findings;
+}
+
+export function normalizeReviewFindingsMarkdown(input: string): string {
+  const normalized = input.replace(/\r\n/g, "\n").trim();
+  if (normalized === "" || normalized === NO_ISSUES_SENTENCE) return normalized;
+
+  const findings = parseReviewFindings(normalized);
   if (findings.length === 0) return normalized;
 
   const severityLabel: Record<"high" | "medium", string> = {
