@@ -82,6 +82,24 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--include-artifacts` - Generate a local HTML debug artifact with per-pass outputs/tokens.
 - `--help` - Show help output.
 
+## Benchmark
+
+Head-to-head against [Alibaba OpenCodeReview](https://github.com/alibaba/open-code-review) v1.8.10 (via its official GitLab CI recipe) on a demo MR with 4 seeded bugs: an auth bypass (`API_KEYS` unset → empty key accepted), a rate limiter whose window never resets, an unbounded per-IP counters Map, and a null-deref crash in a stats endpoint. Same MR, same commit range, same backends.
+
+| Tool | Model | Seeded bugs found | Noise (dups / off-target) | Tokens | LLM time |
+| --- | --- | --- | --- | --- | --- |
+| **gitlab-ai-review** | gpt-5.4 | 3 / 4 | 0 | 15.7k | ~17s |
+| OpenCodeReview | gpt-5.4 | 3 / 4 | 2 | 41.5k | ~11s |
+| **gitlab-ai-review** | self-hosted (single GPU) | **4 / 4** | **0** | 37.2k | 7m 24s |
+| OpenCodeReview | self-hosted (single GPU) | 3 / 4 | 8 (incl. 5 duplicates) | 151.8k | 11m 45s |
+
+Notes:
+
+- On gpt-5.4 both tools found the same 3 bugs and both missed the memory leak. OpenCodeReview added two design opinions, one of which (severity "high") suggested removing the very auth feature the MR introduces.
+- On the self-hosted model the multi-pass pipeline (triage → per-file review → consolidate → verify) paid off: all 4 seeded bugs, zero noise. OpenCodeReview posted 11 comments: 3 unique real findings, 5 duplicates, and 3 off-target — its only rate-limiter comment misdiagnosed the bug, and several comments were attributed to the wrong file or line.
+- Weak-model reviews are output-bound on a single GPU: OpenCodeReview generated 40.2k output tokens vs our 18.5k, and consumed 6× our prompt tokens (111.6k vs 18.7k) — that difference is the wall-clock gap.
+- Methodology caveats: single run per cell on one MR; LLM variance applies.
+
 ## Architecture
 
 The reviewer uses a three-pass pipeline optimized for large merge requests:
