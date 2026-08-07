@@ -41,6 +41,10 @@ import {
  *  proxy timeout so the SDK's 5xx retries stay the first line of defense. */
 const COMPLETION_TIMEOUT_MS = 180_000;
 
+/** Whether to request token usage in streamed completions. Flipped off for the
+ *  rest of the run the first time a gateway rejects stream_options with a 400. */
+let streamUsageSupported = true;
+
 /** Tool-result caps. Every tool response is re-sent as prompt on each following
  *  round, so oversized results multiply prefill time on self-hosted models. */
 const MAX_TOOL_FILE_CHARS = 12_000;
@@ -141,12 +145,30 @@ async function createCompletionWithDebug(params: {
   // The SDK's own timeout only covers time-to-headers; a stalled SSE body would hang
   // forever without the explicit AbortSignal deadline.
   const { stream: _stream, ...createParams } = request;
-  try {
-    const completion = await openaiInstance.chat.completions
-      .stream(createParams, {
-        signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
-      })
+  const attempt = (withUsage: boolean) =>
+    openaiInstance.chat.completions
+      .stream(
+        withUsage
+          ? { ...createParams, stream_options: { include_usage: true } }
+          : createParams,
+        { signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS) },
+      )
       .finalChatCompletion();
+  try {
+    let completion: any;
+    try {
+      completion = await attempt(streamUsageSupported);
+    } catch (error: any) {
+      // Strict OpenAI-compatible gateways 400 on unknown params. Drop the
+      // usage request for the rest of the run and retry this call once.
+      const rejectedStreamOptions =
+        streamUsageSupported &&
+        error?.status === 400 &&
+        String(error?.message ?? "").includes("stream_options");
+      if (!rejectedStreamOptions) throw error;
+      streamUsageSupported = false;
+      completion = await attempt(false);
+    }
     await appendDebugDump(debugDumpFile, debugRecordWriter, {
       kind: "openai_response",
       label: requestLabel,
