@@ -126,8 +126,8 @@ export const buildPrompt = ({
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_MAX_FINDINGS = 5;
-// ponytail: 2 keeps self-hosted gateways under their proxy timeout; raise via
-// --max-review-concurrency on backends that batch well.
+// ponytail: 2 suits most gateways; single-GPU backends that queue-starve past
+// the per-call deadline should set AI_REVIEW_CONCURRENCY=1 (or the flag).
 export const DEFAULT_REVIEW_CONCURRENCY = 2;
 export interface TriageFileInput {
   path: string;

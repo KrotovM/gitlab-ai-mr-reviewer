@@ -58,6 +58,7 @@ Set these in your project/group CI settings:
 - `AI_PROMPT_PROFILE` (optional, default: `default`; one of `default` \| `weak`). Use `weak` for small or heavily-quantized models (≤ ~7B, local Ollama, etc.). The `weak` profile uses shorter system prompts, positive rules instead of negations, and inline few-shot examples for triage / per-file review / consolidation / verification, which dramatically improves output-format adherence on weak models. When the variable is not set, the profile is auto-detected: if the triage pass returns unparseable JSON with `default` prompts, triage is retried once with `weak` and, on success, the whole run continues with it. Set the variable explicitly to pin a profile and disable auto-detection.
 - `PROJECT_ACCESS_TOKEN` (optional for public projects, but required for most private projects; token with `api` scope)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
+- `AI_REVIEW_CONCURRENCY` (optional) — same as `--max-review-concurrency`, handy as a CI/CD variable; the flag wins when both are set.
 - `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `ai-review-report.html`; used with `--include-artifacts`)
 
 `OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
@@ -77,7 +78,7 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--max-total-prompt-chars=220000` - Final hard cap for prompt size (single-pass fallback only).
 - `--triage-diff-chars=2000` - Max chars per file diff sent to the triage pass (Pass 1). Increase for large diffs where the first hunks are mostly git headers.
 - `--max-findings=5` - Max findings in the final review (CI multi-pass only).
-- `--max-review-concurrency=5` - Parallel per-file review API calls (CI multi-pass only).
+- `--max-review-concurrency=2` - Parallel per-file review API calls (CI multi-pass only). Set to 1 for single-GPU backends that queue-starve long requests.
 - `--debug` - Print full error details (stack and API error fields).
 - `--include-artifacts` - Generate a local HTML debug artifact with per-pass outputs/tokens.
 - `--help` - Show help output.
