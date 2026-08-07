@@ -50,7 +50,7 @@ function printHelp(): void {
       "  --max-total-prompt-chars=220000",
       "  --triage-diff-chars=2000   Max chars per file diff in triage pass (Pass 1).",
       "  --max-findings=5          Max findings in final review (CI multi-pass only).",
-      "  --max-review-concurrency=5  Parallel per-file review calls (CI multi-pass only).",
+      "  --max-review-concurrency=2  Parallel per-file review calls (CI multi-pass only).",
       "",
       "Env vars:",
       "  OPENAI_API_KEY (required)  OpenAI API key.",

@@ -36,6 +36,10 @@ import {
   TOOL_NAME_GREP,
 } from "./tooling.js";
 
+/** Hard deadline per model call, retries included. Must exceed the gateway's own
+ *  proxy timeout so the SDK's 5xx retries stay the first line of defense. */
+const COMPLETION_TIMEOUT_MS = 180_000;
+
 type LoggerFns = {
   logStep: (message: string) => void;
   logDebug: (message: string) => void;
@@ -128,10 +132,14 @@ async function createCompletionWithDebug(params: {
   });
   // Stream and reassemble: reverse proxies (nginx proxy_read_timeout) return 504 on
   // long silent non-streamed completions; streamed chunks keep the connection alive.
+  // The SDK's own timeout only covers time-to-headers; a stalled SSE body would hang
+  // forever without the explicit AbortSignal deadline.
   const { stream: _stream, ...createParams } = request;
   try {
     const completion = await openaiInstance.chat.completions
-      .stream(createParams)
+      .stream(createParams, {
+        signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
+      })
       .finalChatCompletion();
     await appendDebugDump(debugDumpFile, debugRecordWriter, {
       kind: "openai_response",
