@@ -5,6 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@krotovm/gitlab-ai-review)](https://www.npmjs.com/package/@krotovm/gitlab-ai-review)
 [![downloads](https://img.shields.io/npm/dm/@krotovm/gitlab-ai-review)](https://www.npmjs.com/package/@krotovm/gitlab-ai-review)
 [![license](https://img.shields.io/npm/l/@krotovm/gitlab-ai-review)](https://github.com/KrotovM/gitlab-ai-mr-reviewer/blob/main/LICENSE)
+[![GitLab CI/CD Catalog](https://img.shields.io/gitlab/v/release/KrotovM/gitlab-ai-review?label=GitLab%20CI%2FCD%20Catalog&color=fc6d26)](https://gitlab.com/explore/catalog/KrotovM/gitlab-ai-review)
 
 Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
 
@@ -34,6 +35,15 @@ ai_review:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:
     - npx -y @krotovm/gitlab-ai-review
+```
+
+Or include it as a [CI/CD component from the GitLab Catalog](https://gitlab.com/explore/catalog/KrotovM/gitlab-ai-review) (gitlab.com):
+
+```yaml
+include:
+  - component: gitlab.com/KrotovM/gitlab-ai-review/review@1.0.2
+    inputs:
+      args: "--include-artifacts"
 ```
 
 Save debug HTML as a CI artifact:
