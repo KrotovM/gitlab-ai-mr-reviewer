@@ -27,7 +27,7 @@ import {
   searchRepository,
   type MergeRequestChange,
 } from "../gitlab/services.js";
-import { truncateWithMarker } from "../prompt/utils.js";
+import { parseReviewFindings, truncateWithMarker } from "../prompt/utils.js";
 import {
   logToolUsageMinimal,
   MAX_FILE_TOOL_ROUNDS,
@@ -1185,6 +1185,28 @@ export async function reviewMergeRequestMultiPass(params: {
   const withHeader = (body: string): string =>
     `### 🤖 AI Code Review\n\n${summaryText === "" ? "" : `> ${summaryText}\n\n`}${body}`;
 
+  // Cap transparency: if consolidation likely trimmed the list (final count hit
+  // the cap while per-file review produced more candidates), say so in the note
+  // instead of silently dropping findings.
+  // ponytail: candidates deduped by file+title only; differently-worded dupes
+  // across files still inflate the count, which is why the note says "candidate".
+  const candidateCount = new Set(
+    perFileFindings.flatMap((f) =>
+      parseReviewFindings(f.findings).map(
+        (x) => `${x.file}|${x.title.toLowerCase()}`,
+      ),
+    ),
+  ).size;
+  const withCapNote = (body: string): string => {
+    const finalCount = parseReviewFindings(body).length;
+    if (finalCount < maxFindings || candidateCount <= finalCount) return body;
+    const note = `\n\nℹ️ Showing top ${finalCount} of ${candidateCount} candidate findings (\`--max-findings=${maxFindings}\`). Run with \`--include-artifacts\` for the full list.`;
+    const disclaimerAt = body.lastIndexOf("\n\n---\n_");
+    return disclaimerAt === -1
+      ? body + note
+      : body.slice(0, disclaimerAt) + note + body.slice(disclaimerAt);
+  };
+
   logStep("Pass 3/4: consolidating findings");
   const consolidateMessages = buildConsolidatePrompt({
     perFileFindings,
@@ -1211,7 +1233,7 @@ export async function reviewMergeRequestMultiPass(params: {
     });
     const consolidatedText = extractCompletionText(consolidateCompletion);
     if (consolidatedText == null || consolidatedText.trim() === "") {
-      return withHeader(buildAnswer(consolidateCompletion));
+      return withHeader(withCapNote(buildAnswer(consolidateCompletion)));
     }
 
     logStep("Pass 4/4: verifying consolidated findings (repo tools)");
@@ -1238,12 +1260,12 @@ export async function reviewMergeRequestMultiPass(params: {
         debugDumpFile,
         debugRecordWriter,
       });
-      return withHeader(buildAnswer(verificationCompletion));
+      return withHeader(withCapNote(buildAnswer(verificationCompletion)));
     } catch (error: any) {
       logStep(
         `Verification failed: ${error?.message ?? error}. Returning consolidated findings.`,
       );
-      return withHeader(buildAnswer(consolidateCompletion));
+      return withHeader(withCapNote(buildAnswer(consolidateCompletion)));
     }
   } catch (error: any) {
     logStep(
