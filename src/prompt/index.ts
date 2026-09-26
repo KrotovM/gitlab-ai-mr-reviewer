@@ -16,8 +16,8 @@ import {
   truncateWithMarker,
 } from "./utils.js";
 import {
-  getConsolidateSystemLines,
-  getVerificationSystemLines,
+  getConsolidateSystemPrompt,
+  getVerificationSystemPrompt,
 } from "./templates/postprocess-system.js";
 import {
   buildConsolidateUserContent,
@@ -310,7 +310,7 @@ export function buildConsolidatePrompt(params: {
   return [
     {
       role: "system" as const,
-      content: getConsolidateSystemLines(profile, maxFindings).join("\n"),
+      content: getConsolidateSystemPrompt(profile, maxFindings),
     },
     {
       role: "user" as const,
@@ -346,7 +346,7 @@ export function buildVerificationPrompt(params: {
   return [
     {
       role: "system" as const,
-      content: getVerificationSystemLines(profile, maxFindings).join("\n"),
+      content: getVerificationSystemPrompt(profile, maxFindings),
     },
     {
       role: "user" as const,

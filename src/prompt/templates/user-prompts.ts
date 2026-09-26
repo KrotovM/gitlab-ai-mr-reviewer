@@ -16,15 +16,13 @@ export function buildMainReviewUserContent(params: {
   changesText: string;
 }): string {
   const { stats, toolNote, changesText } = params;
-  return [
-    `Review the following code changes (git diff format). ${stats}`,
-    toolNote,
-    "",
-    "Changes:",
-    changesText || "(no changes provided)",
-    "",
-    "Produce your review now. Follow the system instructions strictly.",
-  ].join("\n");
+  return `Review the following code changes (git diff format). ${stats}
+${toolNote}
+
+Changes:
+${changesText || "(no changes provided)"}
+
+Produce your review now. Follow the system instructions strictly.`;
 }
 
 export function buildTriageUserContent(
@@ -56,18 +54,16 @@ export function buildFileReviewUserContent(params: {
       ? `\nOther files changed in this MR: ${otherChangedFiles.join(", ")}`
       : "";
 
-  return [
-    `MR Summary: ${summary}`,
-    otherFilesNote,
-    "",
-    toolNote,
-    "",
-    `File: ${filePath}`,
-    "Diff:",
-    fileDiff,
-    "",
-    "Review this file now.",
-  ].join("\n");
+  return `MR Summary: ${summary}
+${otherFilesNote}
+
+${toolNote}
+
+File: ${filePath}
+Diff:
+${fileDiff}
+
+Review this file now.`;
 }
 
 export function buildConsolidateUserContent(params: {
@@ -76,14 +72,12 @@ export function buildConsolidateUserContent(params: {
   maxFindings: number;
 }): string {
   const { summary, findingsText, maxFindings } = params;
-  return [
-    `MR Summary: ${summary}`,
-    "",
-    "Per-file findings:",
-    findingsText,
-    "",
-    `Return the top ${maxFindings} findings in the required bullet format.`,
-  ].join("\n");
+  return `MR Summary: ${summary}
+
+Per-file findings:
+${findingsText}
+
+Return the top ${maxFindings} findings in the required bullet format.`;
 }
 
 export function buildVerificationUserContent(params: {
@@ -93,17 +87,15 @@ export function buildVerificationUserContent(params: {
   refs: { base: string; head: string };
 }): string {
   const { summary, findingsText, consolidatedFindings, refs } = params;
-  return [
-    `MR Summary: ${summary}`,
-    "",
-    `Refs for tools: head (post-change)="${refs.head}", base="${refs.base}". Prefer head when checking whether the issue exists in the MR.`,
-    "",
-    "Per-file findings (evidence pool):",
-    findingsText,
-    "",
-    "Draft consolidated findings to verify:",
-    consolidatedFindings,
-    "",
-    "Return only the verified final findings.",
-  ].join("\n");
+  return `MR Summary: ${summary}
+
+Refs for tools: head (post-change)="${refs.head}", base="${refs.base}". Prefer head when checking whether the issue exists in the MR.
+
+Per-file findings (evidence pool):
+${findingsText}
+
+Draft consolidated findings to verify:
+${consolidatedFindings}
+
+Return only the verified final findings.`;
 }

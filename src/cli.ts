@@ -31,43 +31,41 @@ import { renderDebugArtifactsHtml } from "./cli/debug-artifacts-html.js";
 
 function printHelp(): void {
   process.stdout.write(
-    [
-      "gitlab-ai-review",
-      "",
-      "Usage:",
-      "  gitlab-ai-review",
-      "  gitlab-ai-review --help",
-      "  gitlab-ai-review --debug",
-      "  gitlab-ai-review --ignore-ext=md,lock",
-      "",
-      "Debug:",
-      "  --debug        Print full error details (stack, API error fields).",
-      "  --include-artifacts  Generate local HTML artifact without printing payloads to console.",
-      "  --force-tools  Force at least one tool-call round in tool-enabled review paths.",
-      "  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock",
-      "  --max-diffs=50",
-      "  --max-diff-chars=16000",
-      "  --max-total-prompt-chars=220000",
-      "  --triage-diff-chars=2000   Max chars per file diff in triage pass (Pass 1).",
-      "  --max-findings=5          Max findings in final review (CI multi-pass only).",
-      "  --max-review-concurrency=2  Parallel per-file review calls (CI multi-pass only).",
-      "",
-      "Env vars:",
-      "  OPENAI_API_KEY (required)  OpenAI API key.",
-      "  OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.",
-      "  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.",
-      "  AI_REVIEW_CONCURRENCY (optional)  Same as --max-review-concurrency; the flag wins.",
-      "  AI_PROMPT_PROFILE (optional)  Prompt style: \"default\" | \"weak\". Default: default.",
-      "                              Use \"weak\" for small/quantized models — shorter prompts,",
-      "                              positive rules, and few-shot examples.",
-      "                              When unset, an unparseable triage response auto-retries",
-      "                              with \"weak\" and keeps it for the whole run.",
-      "  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (required for most private repos; should have api scope).",
-      "",
-      "CI-only env vars (provided by GitLab):",
-      "  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN (only if PROJECT_ACCESS_TOKEN is not set)",
-      "",
-    ].join("\n"),
+    `gitlab-ai-review
+
+Usage:
+  gitlab-ai-review
+  gitlab-ai-review --help
+  gitlab-ai-review --debug
+  gitlab-ai-review --ignore-ext=md,lock
+
+Debug:
+  --debug        Print full error details (stack, API error fields).
+  --include-artifacts  Generate local HTML artifact without printing payloads to console.
+  --force-tools  Force at least one tool-call round in tool-enabled review paths.
+  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock
+  --max-diffs=50
+  --max-diff-chars=16000
+  --max-total-prompt-chars=220000
+  --triage-diff-chars=2000   Max chars per file diff in triage pass (Pass 1).
+  --max-findings=5          Max findings in final review (CI multi-pass only).
+  --max-review-concurrency=2  Parallel per-file review calls (CI multi-pass only).
+
+Env vars:
+  OPENAI_API_KEY (required)  OpenAI API key.
+  OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.
+  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.
+  AI_REVIEW_CONCURRENCY (optional)  Same as --max-review-concurrency; the flag wins.
+  AI_PROMPT_PROFILE (optional)  Prompt style: "default" | "weak". Default: default.
+                              Use "weak" for small/quantized models — shorter prompts,
+                              positive rules, and few-shot examples.
+                              When unset, an unparseable triage response auto-retries
+                              with "weak" and keeps it for the whole run.
+  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (required for most private repos; should have api scope).
+
+CI-only env vars (provided by GitLab):
+  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN (only if PROJECT_ACCESS_TOKEN is not set)
+`,
   );
 }
 

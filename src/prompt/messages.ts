@@ -2,10 +2,10 @@
 
 import type { ChatCompletionMessageParam } from "openai/resources/index.mjs";
 import {
-  getFileReviewSystemLines,
-  getMainSystemLines,
+  getFileReviewSystemPrompt,
+  getMainSystemPrompt,
 } from "./templates/review-system.js";
-import { getTriageSystemLines } from "./templates/triage-system.js";
+import { getTriageSystemPrompt } from "./templates/triage-system.js";
 import type { PromptProfile } from "./profile.js";
 import { DEFAULT_PROMPT_PROFILE } from "./profile.js";
 
@@ -14,7 +14,7 @@ export const buildMainSystemMessages = (
 ): ChatCompletionMessageParam[] => [
   {
     role: "system",
-    content: getMainSystemLines(profile).join("\n"),
+    content: getMainSystemPrompt(profile),
   },
 ];
 
@@ -22,14 +22,14 @@ export const buildTriageSystemMessage = (
   profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
 ): ChatCompletionMessageParam => ({
   role: "system",
-  content: getTriageSystemLines(profile).join("\n"),
+  content: getTriageSystemPrompt(profile),
 });
 
 export const buildFileReviewSystemMessage = (
   profile: PromptProfile = DEFAULT_PROMPT_PROFILE,
 ): ChatCompletionMessageParam => ({
   role: "system",
-  content: getFileReviewSystemLines(profile).join("\n"),
+  content: getFileReviewSystemPrompt(profile),
 });
 
 /** @deprecated kept for backward compatibility — use buildTriageSystemMessage(). */
