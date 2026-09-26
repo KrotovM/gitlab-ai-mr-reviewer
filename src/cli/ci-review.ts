@@ -244,7 +244,7 @@ async function handleGetFileTool(
       });
     }
     const fileText = await fetchFileAtRef({
-      gitLabBaseUrl: gitLabProjectApiUrl,
+      gitLabProjectApiUrl: gitLabProjectApiUrl,
       headers,
       filePath: path,
       ref,
@@ -287,7 +287,7 @@ async function handleGrepTool(
       return JSON.stringify({ ok: false, error: "query is required." });
     const ref = parsed.ref?.trim() || defaultRef;
     const results = await searchRepository({
-      gitLabBaseUrl: gitLabProjectApiUrl,
+      gitLabProjectApiUrl: gitLabProjectApiUrl,
       headers,
       query,
       ref,

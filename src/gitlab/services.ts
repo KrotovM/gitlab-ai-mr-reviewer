@@ -16,7 +16,7 @@ type GitLabFetchFunction<
   Result = GitLabError,
 > = (
   fetchParams: {
-    gitLabBaseUrl: URL;
+    gitLabProjectApiUrl: URL;
     headers: GitLabFetchHeaders;
   } & URLParams,
   ...rest: any[]
@@ -34,10 +34,10 @@ type FetchPreEditFilesResult = OldFileVersion[] | GitLabError;
 export const fetchPreEditFiles: GitLabFetchFunction<
   FetchPreEditFilesParams,
   FetchPreEditFilesResult
-> = async ({ gitLabBaseUrl, headers, changesOldPaths, ref }) => {
+> = async ({ gitLabProjectApiUrl, headers, changesOldPaths, ref }) => {
   const oldFilesRequestUrls = changesOldPaths.map((filePath) => {
     const url = new URL(
-      `${gitLabBaseUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
+      `${gitLabProjectApiUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
     );
     url.searchParams.set("ref", ref);
     return url;
@@ -90,9 +90,9 @@ type FetchFileAtRefResult = string | GitLabError;
 export const fetchFileAtRef: GitLabFetchFunction<
   FetchFileAtRefParams,
   FetchFileAtRefResult
-> = async ({ gitLabBaseUrl, headers, filePath, ref }) => {
+> = async ({ gitLabProjectApiUrl, headers, filePath, ref }) => {
   const url = new URL(
-    `${gitLabBaseUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
+    `${gitLabProjectApiUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
   );
   url.searchParams.set("ref", ref);
   let res: Response | Error;
@@ -168,11 +168,11 @@ export const postMergeRequestNote: GitLabFetchFunction<
   PostMergeRequestNoteParams,
   PostMergeRequestNoteResult
 > = async (
-  { gitLabBaseUrl, headers, mergeRequestIid },
+  { gitLabProjectApiUrl, headers, mergeRequestIid },
   commentPayload: CommentPayload,
 ): Promise<void | GitLabError> => {
   const commentUrl = new URL(
-    `${gitLabBaseUrl}/merge_requests/${mergeRequestIid}/notes`,
+    `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes`,
   );
   let aiComment: Response | Error;
   try {
@@ -233,8 +233,8 @@ type SearchRepositoryResult = SearchBlobResult[] | GitLabError;
 export const searchRepository: GitLabFetchFunction<
   SearchRepositoryParams,
   SearchRepositoryResult
-> = async ({ gitLabBaseUrl, headers, query, ref, projectId }) => {
-  const url = new URL(`${gitLabBaseUrl}/projects/${projectId}/search`);
+> = async ({ gitLabProjectApiUrl, headers, query, ref}) => {
+  const url = new URL(`${gitLabProjectApiUrl}/search`);
   url.searchParams.set("scope", "blobs");
   url.searchParams.set("search", query);
   url.searchParams.set("ref", ref);
@@ -300,9 +300,9 @@ type FetchMergeRequestChangesResult = MergeRequestChangesResponse | GitLabError;
 export const fetchMergeRequestChanges: GitLabFetchFunction<
   FetchMergeRequestChangesParams,
   FetchMergeRequestChangesResult
-> = async ({ gitLabBaseUrl, headers, projectId, mergeRequestIid }) => {
+> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid }) => {
   const url = new URL(
-    `${gitLabBaseUrl}/projects/${projectId}/merge_requests/${mergeRequestIid}/changes`,
+    `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/changes`,
   );
   // Ask GitLab for raw diffs to reduce truncation on larger merge requests.
   url.searchParams.set("access_raw_diffs", "true");
