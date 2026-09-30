@@ -65,6 +65,14 @@ export const fetchFileAtRef: GitLabFetchFunction<
   return await res.text();
 };
 
+/** GitLab runs quick actions (`/merge`, `/approve`, …) that start a line of a
+ *  note, with the token's permissions. Model text must never trigger them, so
+ *  indent such lines by a space (renders the same, no longer a command).
+ *  Command names start with a letter, so `// comment` lines stay as they are. */
+function neutralizeQuickActions(body: string): string {
+  return body.replace(/^\/(?=[a-z])/gim, " /");
+}
+
 interface PostMergeRequestNoteParams {
   mergeRequestIid: string | number;
   note: string;
@@ -87,7 +95,7 @@ export const postMergeRequestNote: GitLabFetchFunction<
         ...headers,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({body: note}),
+      body: JSON.stringify({ body: neutralizeQuickActions(note) }),
     });
   } catch (error: any) {
     aiComment = error;
@@ -248,4 +256,164 @@ export const fetchMergeRequestChanges: GitLabFetchFunction<
   }
 
   return (await res.json()) as MergeRequestChangesResponse;
+};
+
+/** fetch with the same error details as above, for the inline-comment calls. */
+async function gitlabRequest(
+  url: URL,
+  init: RequestInit,
+  message: string,
+): Promise<Response | GitLabError> {
+  let res: Response | Error;
+  try {
+    res = await fetch(url, init);
+  } catch (error: any) {
+    res = error;
+  }
+  if (!(res instanceof Error) && res.ok) return res;
+  const cause =
+    res instanceof Error
+      ? { url: url.toString(), error: { name: res.name, message: res.message } }
+      : {
+          url: url.toString(),
+          status: res.status,
+          statusText: res.statusText,
+          body: (await res.text().catch(() => "")).slice(0, 1000),
+        };
+  return new GitLabError({
+    name: "INLINE_COMMENTS_FAILED",
+    message,
+    statusCode: res instanceof Error ? 502 : res.status,
+    cause,
+  });
+}
+
+export interface DiffPosition {
+  position_type: "text";
+  base_sha: string;
+  start_sha: string;
+  head_sha: string;
+  old_path: string;
+  new_path: string;
+  new_line: number;
+  old_line?: number;
+}
+
+export interface MergeRequestDiscussion {
+  id: string;
+  notes: Array<{
+    body: string;
+    system?: boolean;
+    resolved?: boolean;
+    position?: Partial<DiffPosition> | null;
+  }>;
+}
+
+interface MergeRequestParams {
+  mergeRequestIid: string | number;
+}
+
+export const fetchMergeRequestDiffRefs: GitLabFetchFunction<
+  MergeRequestParams,
+  MergeRequestChangesDiffRef | GitLabError
+> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid }) => {
+  const res = await gitlabRequest(
+    new URL(`${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}`),
+    { headers: { ...headers } },
+    "Failed to fetch merge request",
+  );
+  if (res instanceof Error) return res;
+  const mr = (await res.json()) as { diff_refs?: MergeRequestChangesDiffRef };
+  return mr.diff_refs ?? {};
+};
+
+export const listMergeRequestDiscussions: GitLabFetchFunction<
+  MergeRequestParams,
+  MergeRequestDiscussion[] | GitLabError
+> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid }) => {
+  const discussions: MergeRequestDiscussion[] = [];
+  // ponytail: reads at most 50 pages (5000 threads); raise if an MR ever has more.
+  for (let page = 1; page <= 50; page += 1) {
+    const url = new URL(
+      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions`,
+    );
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("page", String(page));
+    const res = await gitlabRequest(
+      url,
+      { headers: { ...headers } },
+      "Failed to list merge request threads",
+    );
+    if (res instanceof Error) return res;
+    const batch = (await res.json()) as MergeRequestDiscussion[];
+    discussions.push(...batch);
+    // A page can be short while more follow (GitLab drops notes the token
+    // can't read after paginating), so trust X-Next-Page when it is sent.
+    const next = res.headers.get("x-next-page");
+    if (next === "" || (next == null && batch.length < 100)) break;
+  }
+  return discussions;
+};
+
+interface CreateMergeRequestDiscussionParams extends MergeRequestParams {
+  body: string;
+  position: DiffPosition;
+}
+export const createMergeRequestDiscussion: GitLabFetchFunction<
+  CreateMergeRequestDiscussionParams,
+  void | GitLabError
+> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid, body, position }) => {
+  const res = await gitlabRequest(
+    new URL(
+      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions`,
+    ),
+    {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ body: neutralizeQuickActions(body), position }),
+    },
+    `Failed to create a diff thread at ${position.new_path}:${position.new_line}`,
+  );
+  return res instanceof Error ? res : undefined;
+};
+
+interface ResolveMergeRequestDiscussionParams extends MergeRequestParams {
+  discussionId: string;
+}
+export const resolveMergeRequestDiscussion: GitLabFetchFunction<
+  ResolveMergeRequestDiscussionParams,
+  void | GitLabError
+> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid, discussionId }) => {
+  const url = new URL(
+    `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions/${discussionId}`,
+  );
+  url.searchParams.set("resolved", "true");
+  const res = await gitlabRequest(
+    url,
+    { method: "PUT", headers: { ...headers } },
+    `Failed to resolve thread ${discussionId}`,
+  );
+  return res instanceof Error ? res : undefined;
+};
+
+interface ReplyToMergeRequestDiscussionParams extends MergeRequestParams {
+  discussionId: string;
+  body: string;
+}
+export const replyToMergeRequestDiscussion: GitLabFetchFunction<
+  ReplyToMergeRequestDiscussionParams,
+  void | GitLabError
+> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid, discussionId, body }) => {
+  const res = await gitlabRequest(
+    new URL(
+      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions/${discussionId}/notes`,
+    ),
+    {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ body: neutralizeQuickActions(body) }),
+    },
+    `Failed to reply to thread ${discussionId}`,
+  );
+  return res instanceof Error ? res : undefined;
 };

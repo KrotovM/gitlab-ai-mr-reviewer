@@ -101,7 +101,17 @@ GitLab provides these automatically in Merge Request pipelines:
 - `--max-review-concurrency=2` - Parallel per-file review API calls (CI multi-pass only). Set to 1 for single-GPU backends that queue-starve long requests.
 - `--debug` - Print full error details (stack and API error fields).
 - `--include-artifacts` - Generate a local HTML debug artifact with per-pass outputs/tokens.
+- `--inline-comments` - Post findings on changed lines as resolvable diff threads; the rest stays in the summary comment. See [Inline comments](#inline-comments).
 - `--help` - Show help output.
+
+## Inline comments
+
+With `--inline-comments`, each finding whose line falls inside the MR diff becomes a resolvable diff thread. Findings outside the diff (unchanged code, other files) stay in the summary comment, which also counts the threads. On later runs:
+
+- A finding is not posted again when an AI thread already sits within 3 lines of it on unchanged code — open or resolved, so resolving a false positive dismisses it.
+- An open AI thread whose code changed (GitLab shows it as outdated) is resolved automatically with a short reply, unless someone replied to it; if you reopen it afterwards, later runs leave it alone. If the review reports the issue again, it is posted as a new thread. GitLab's own **Automatically resolve merge request diff threads when they become outdated** setting does this for every thread.
+
+Turn on **Settings → Merge requests → All threads must be resolved** to make AI findings block the merge until someone fixes or dismisses them. Line numbers come from the model and are approximate, so a thread can land a line or two away from the issue. Resolving threads needs a token with at least the Developer role.
 
 ## Benchmark
 

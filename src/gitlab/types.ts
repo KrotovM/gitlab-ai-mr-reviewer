@@ -10,6 +10,7 @@ type GitLabErrorName =
   | 'MISSING_OLD_FILES'
   | 'FAILED_TO_POST_COMMENT'
   | 'SEARCH_FAILED'
+  | 'INLINE_COMMENTS_FAILED'
 
 export class GitLabError extends BaseError<GitLabErrorName> { }
 
