@@ -61,10 +61,10 @@ Env vars:
                               positive rules, and few-shot examples.
                               When unset, an unparseable triage response auto-retries
                               with "weak" and keeps it for the whole run.
-  PROJECT_ACCESS_TOKEN (optional)  GitLab Project/Personal Access Token for API calls (required for most private repos; should have api scope).
+  PROJECT_ACCESS_TOKEN (required)  GitLab project/personal access token with api scope (alias: GITLAB_TOKEN). CI_JOB_TOKEN can't post MR comments.
 
 CI-only env vars (provided by GitLab):
-  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_JOB_TOKEN (only if PROJECT_ACCESS_TOKEN is not set)
+  CI_API_V4_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_PROJECT_ID, CI_MERGE_REQUEST_IID
 `,
   );
 }
@@ -150,17 +150,20 @@ async function main(): Promise<void> {
     "CI_PROJECT_ID",
     "CI_MERGE_REQUEST_IID",
   ];
-  if (projectAccessToken == null) gitlabRequired.push("CI_JOB_TOKEN");
+  // CI_JOB_TOKEN can't post MR notes or call the search API, so a real token is required.
+  if (projectAccessToken == null) gitlabRequired.push("PROJECT_ACCESS_TOKEN");
   const envs = requireEnvs(gitlabRequired);
   const openaiApiKey = envs["OPENAI_API_KEY"]!;
   const ciApiV4Url = envs["CI_API_V4_URL"]!;
-  const projectId = envs["CI_PROJECT_ID"]!;
+  // MR endpoints live in the MR's target project; in fork pipelines CI_PROJECT_ID is the fork.
+  const projectId =
+    envOrUndefined("CI_MERGE_REQUEST_PROJECT_ID") ?? envs["CI_PROJECT_ID"]!;
   const mergeRequestIid = envs["CI_MERGE_REQUEST_IID"]!;
   const gitLabProjectApiUrl = new URL(`${ciApiV4Url}/projects/${projectId}`);
 
-  const headers: Record<string, string> = {};
-  if (projectAccessToken != null) headers["PRIVATE-TOKEN"] = projectAccessToken;
-  else headers["JOB-TOKEN"] = envs["CI_JOB_TOKEN"]!;
+  const headers: Record<string, string> = {
+    "PRIVATE-TOKEN": projectAccessToken!,
+  };
 
   try {
     logStep("Fetching merge request changes");

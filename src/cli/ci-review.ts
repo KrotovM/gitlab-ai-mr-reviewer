@@ -50,6 +50,7 @@ let streamUsageSupported = true;
  *  round, so oversized results multiply prefill time on self-hosted models. */
 const MAX_TOOL_FILE_CHARS = 12_000;
 const MAX_TOOL_GREP_CHARS = 800;
+const MAX_TOOL_GREP_RESULTS = 10;
 
 type LoggerFns = {
   logStep: (message: string) => void;
@@ -272,7 +273,7 @@ async function handleGetFileTool(
     logToolFailure(logStep, TOOL_NAME_GET_FILE, error);
     return JSON.stringify({
       ok: false,
-      error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
+      error: `Tool call failed: ${String(error?.message ?? error)}`,
       raw: argsRaw,
     });
   }
@@ -280,7 +281,7 @@ async function handleGetFileTool(
 
 async function handleGrepTool(
   argsRaw: string,
-  defaultRef: string,
+  refs: { base: string; head: string },
   gitLabProjectApiUrl: URL,
   headers: Record<string, string>,
   logStep: (message: string) => void,
@@ -290,7 +291,8 @@ async function handleGrepTool(
     const query = parsed.query?.trim();
     if (!query)
       return JSON.stringify({ ok: false, error: "query is required." });
-    const ref = parsed.ref?.trim() || defaultRef;
+    // GitLab search answers 200 [] for unknown refs, so only the MR's own refs are searched.
+    const ref = parsed.ref?.trim() === refs.base ? refs.base : refs.head;
     const results = await searchRepository({
       gitLabProjectApiUrl: gitLabProjectApiUrl,
       headers,
@@ -307,17 +309,25 @@ async function handleGrepTool(
         error: results.message,
       });
     }
-    const trimmed = results.map((r) => ({
-      path: r.path,
-      startline: r.startline,
-      data: r.data.slice(0, MAX_TOOL_GREP_CHARS),
-    }));
+    // GitLab lists file-name matches (file head, startline 1) before content matches;
+    // rank hits that contain the query first so they aren't crowded out.
+    const needle = query.toLowerCase();
+    const hasNeedle = (r: { data: string | null }) =>
+      (r.data ?? "").toLowerCase().includes(needle);
+    const trimmed = results
+      .sort((a, b) => Number(hasNeedle(b)) - Number(hasNeedle(a)))
+      .slice(0, MAX_TOOL_GREP_RESULTS)
+      .map((r) => ({
+        path: r.path,
+        startline: r.startline,
+        data: (r.data ?? "").slice(0, MAX_TOOL_GREP_CHARS),
+      }));
     return JSON.stringify({ ok: true, query, ref, matches: trimmed });
   } catch (error: any) {
     logToolFailure(logStep, TOOL_NAME_GREP, error);
     return JSON.stringify({
       ok: false,
-      error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
+      error: `Tool call failed: ${String(error?.message ?? error)}`,
       raw: argsRaw,
     });
   }
@@ -498,7 +508,7 @@ async function reviewMergeRequestWithTools(params: {
       } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
           argsRaw,
-          refs.head,
+          refs,
           gitLabProjectApiUrl,
           headers,
           logStep,
@@ -695,7 +705,7 @@ async function runFileReviewWithTools(params: {
       } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
           argsRaw,
-          refs.head,
+          refs,
           gitLabProjectApiUrl,
           headers,
           logStep,
@@ -884,7 +894,7 @@ async function runVerificationWithTools(params: {
       } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
           argsRaw,
-          refs.head,
+          refs,
           gitLabProjectApiUrl,
           headers,
           logStep,
