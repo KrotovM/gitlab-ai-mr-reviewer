@@ -34,3 +34,14 @@ export function logToolUsageMinimal(
   logStep(`[tools] ${toolName} args=${argsRaw.slice(0, 120)}${suffix}`);
 }
 
+/** Operator-facing line for a failed tool call: GitLab status and request URL when known. */
+export function logToolFailure(
+  logStep: (message: string) => void,
+  toolName: string,
+  error: any,
+): void {
+  const status = error?.statusCode != null ? ` status=${error.statusCode}` : "";
+  const url = typeof error?.cause?.url === "string" ? ` url=${error.cause.url}` : "";
+  logStep(`[tools] ${toolName} failed: ${String(error?.message ?? error)}${status}${url}`);
+}
+

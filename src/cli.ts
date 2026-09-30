@@ -167,7 +167,6 @@ async function main(): Promise<void> {
     const mrChanges = await fetchMergeRequestChanges({
       gitLabProjectApiUrl: gitLabProjectApiUrl,
       headers,
-      projectId,
       mergeRequestIid,
     });
     if (mrChanges instanceof Error) throw mrChanges;
@@ -200,7 +199,6 @@ async function main(): Promise<void> {
         head: mrChanges.diff_refs?.head_sha ?? "HEAD",
       },
       gitLabProjectApiUrl: gitLabProjectApiUrl,
-      projectId,
       headers,
       maxFindings,
       reviewConcurrency,
