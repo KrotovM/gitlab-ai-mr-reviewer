@@ -142,7 +142,8 @@ export const searchRepository: GitLabFetchFunction<
   url.searchParams.set("scope", "blobs");
   url.searchParams.set("search", query);
   url.searchParams.set("ref", ref);
-  url.searchParams.set("per_page", "10");
+  // Name matches come before content matches; the grep tool re-ranks and keeps 10.
+  url.searchParams.set("per_page", "50");
   let res: Response | Error;
   try {
     res = await fetch(url, { headers: { ...headers } });

@@ -76,7 +76,7 @@ Set these in your project/group CI settings:
 - `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
 - `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
 - `AI_PROMPT_PROFILE` (optional, default: `default`; one of `default` \| `weak`). Use `weak` for small or heavily-quantized models (≤ ~7B, local Ollama, etc.). The `weak` profile uses shorter system prompts, positive rules instead of negations, and inline few-shot examples for triage / per-file review / consolidation / verification, which dramatically improves output-format adherence on weak models. When the variable is not set, the profile is auto-detected: if the triage pass returns unparseable JSON with `default` prompts, triage is retried once with `weak` and, on success, the whole run continues with it. Set the variable explicitly to pin a profile and disable auto-detection.
-- `PROJECT_ACCESS_TOKEN` (optional for public projects, but required for most private projects; token with `api` scope)
+- `PROJECT_ACCESS_TOKEN` (required; project or personal access token with `api` scope — `CI_JOB_TOKEN` can't post MR comments or use the search API)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
 - `AI_REVIEW_CONCURRENCY` (optional) — same as `--max-review-concurrency`, handy as a CI/CD variable; the flag wins when both are set.
 - `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `ai-review-report.html`; used with `--include-artifacts`)
@@ -88,7 +88,7 @@ GitLab provides these automatically in Merge Request pipelines:
 - `CI_API_V4_URL`
 - `CI_PROJECT_ID`
 - `CI_MERGE_REQUEST_IID`
-- `CI_JOB_TOKEN` (used only when `PROJECT_ACCESS_TOKEN` is not provided)
+- `CI_MERGE_REQUEST_PROJECT_ID` (the MR's target project; used instead of `CI_PROJECT_ID`, so MRs from forks work)
 
 ## Flags
 
