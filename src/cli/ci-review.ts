@@ -340,7 +340,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-export async function reviewMergeRequestWithTools(params: {
+async function reviewMergeRequestWithTools(params: {
   openaiInstance: OpenAI;
   aiModel: ChatModel;
   promptLimits: PromptLimits;

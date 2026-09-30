@@ -1,13 +1,7 @@
 /** @format */
 
-import type { ChatCompletion, ChatModel } from "openai/resources/index.mjs";
-import type { ChatCompletionMessageParam } from "openai/resources/index.js";
-import OpenAI from "openai";
-import { AI_MODEL_TEMPERATURE } from "../prompt/index.js";
 import {
   GitLabError,
-  OpenAIError,
-  type CommentPayload,
   type GitLabFetchHeaders,
 } from "./types.js";
 
@@ -21,66 +15,6 @@ type GitLabFetchFunction<
   } & URLParams,
   ...rest: any[]
 ) => Promise<Result>;
-
-interface FetchPreEditFilesParams {
-  changesOldPaths: string[];
-  ref: string;
-}
-export interface OldFileVersion {
-  fileName: string;
-  fileContent: string;
-}
-type FetchPreEditFilesResult = OldFileVersion[] | GitLabError;
-export const fetchPreEditFiles: GitLabFetchFunction<
-  FetchPreEditFilesParams,
-  FetchPreEditFilesResult
-> = async ({ gitLabProjectApiUrl, headers, changesOldPaths, ref }) => {
-  const oldFilesRequestUrls = changesOldPaths.map((filePath) => {
-    const url = new URL(
-      `${gitLabProjectApiUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
-    );
-    url.searchParams.set("ref", ref);
-    return url;
-  });
-  let oldFiles: Array<PromiseSettledResult<string>> | Error;
-  try {
-    oldFiles = await Promise.allSettled(
-      oldFilesRequestUrls.map(async (url) => {
-        const res = await fetch(url, { headers: { ...headers } });
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => "");
-          throw new Error(
-            `Failed to fetch old file: ${url.toString()} (status ${res.status} ${res.statusText}, body: ${bodyText.slice(0, 500)})`,
-          );
-        }
-        return await res.text();
-      }),
-    );
-  } catch (error: any) {
-    oldFiles = error;
-  }
-
-  if (oldFiles instanceof Error) {
-    return new GitLabError({
-      name: "MISSING_OLD_FILES",
-      message: "Failed to fetch old files",
-      cause: {
-        message: oldFiles.message,
-        stack: oldFiles.stack,
-      },
-    });
-  }
-
-  return oldFiles.reduce<OldFileVersion[]>((acc, file, index) => {
-    if (file.status === "fulfilled") {
-      acc.push({
-        fileName: changesOldPaths[index]!,
-        fileContent: file.value,
-      });
-    }
-    return acc;
-  }, []);
-};
 
 interface FetchFileAtRefParams {
   filePath: string;
@@ -131,45 +65,16 @@ export const fetchFileAtRef: GitLabFetchFunction<
   return await res.text();
 };
 
-export async function generateAICompletion(
-  messages: ChatCompletionMessageParam[],
-  openaiInstance: OpenAI,
-  aiModel: ChatModel,
-): Promise<ChatCompletion | OpenAIError> {
-  let completion: ChatCompletion | Error;
-
-  try {
-    completion = await openaiInstance.chat.completions.create({
-      model: aiModel,
-      temperature: AI_MODEL_TEMPERATURE,
-      stream: false,
-      messages,
-    });
-  } catch (error: any) {
-    completion = error;
-  }
-
-  if (completion instanceof Error) {
-    return new OpenAIError({
-      name: "MISSING_AI_COMPLETION",
-      message: "Failed to generate AI completion",
-      cause: completion,
-    });
-  }
-
-  return completion;
-}
-
 interface PostMergeRequestNoteParams {
   mergeRequestIid: string | number;
+  note: string;
 }
 type PostMergeRequestNoteResult = void | GitLabError;
 export const postMergeRequestNote: GitLabFetchFunction<
   PostMergeRequestNoteParams,
   PostMergeRequestNoteResult
 > = async (
-  { gitLabProjectApiUrl, headers, mergeRequestIid },
-  commentPayload: CommentPayload,
+  { gitLabProjectApiUrl, headers, mergeRequestIid, note }
 ): Promise<void | GitLabError> => {
   const commentUrl = new URL(
     `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes`,
@@ -182,7 +87,7 @@ export const postMergeRequestNote: GitLabFetchFunction<
         ...headers,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(commentPayload),
+      body: JSON.stringify({body: note}),
     });
   } catch (error: any) {
     aiComment = error;
@@ -223,7 +128,7 @@ interface SearchRepositoryParams {
   ref: string;
   projectId: string | number;
 }
-export interface SearchBlobResult {
+interface SearchBlobResult {
   path: string;
   data: string;
   startline: number;
@@ -271,7 +176,7 @@ export const searchRepository: GitLabFetchFunction<
   return (await res.json()) as SearchBlobResult[];
 };
 
-export interface MergeRequestChangesDiffRef {
+interface MergeRequestChangesDiffRef {
   base_sha?: string;
   head_sha?: string;
   start_sha?: string;
@@ -286,7 +191,7 @@ export interface MergeRequestChange {
   deleted_file?: boolean;
 }
 
-export interface MergeRequestChangesResponse {
+interface MergeRequestChangesResponse {
   changes?: MergeRequestChange[];
   diff_refs?: MergeRequestChangesDiffRef;
   overflow?: boolean;

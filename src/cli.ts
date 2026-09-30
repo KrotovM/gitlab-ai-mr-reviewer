@@ -217,8 +217,8 @@ async function main(): Promise<void> {
         gitLabProjectApiUrl: gitLabProjectApiUrl,
         headers,
         mergeRequestIid,
+        note: answer,
       },
-      { body: answer },
     );
     if (noteRes instanceof Error) throw noteRes;
 
