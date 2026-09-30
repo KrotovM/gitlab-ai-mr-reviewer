@@ -31,11 +31,3 @@ export const buildFileReviewSystemMessage = (
   role: "system",
   content: getFileReviewSystemPrompt(profile),
 });
-
-/** @deprecated kept for backward compatibility — use buildTriageSystemMessage(). */
-export const TRIAGE_SYSTEM: ChatCompletionMessageParam =
-  buildTriageSystemMessage();
-
-/** @deprecated kept for backward compatibility — use buildFileReviewSystemMessage(). */
-export const FILE_REVIEW_SYSTEM: ChatCompletionMessageParam =
-  buildFileReviewSystemMessage();

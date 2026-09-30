@@ -114,9 +114,3 @@ export function getMainSystemPrompt(profile: PromptProfile): string {
 export function getFileReviewSystemPrompt(profile: PromptProfile): string {
   return profile === "weak" ? FILE_WEAK : FILE_DEFAULT;
 }
-
-/** @deprecated kept for backward compatibility — use getMainSystemPrompt("default"). */
-export const MAIN_SYSTEM_LINES: string[] = MAIN_DEFAULT.split("\n");
-
-/** @deprecated kept for backward compatibility — use getFileReviewSystemPrompt("default"). */
-export const FILE_REVIEW_SYSTEM_LINES: string[] = FILE_DEFAULT.split("\n");

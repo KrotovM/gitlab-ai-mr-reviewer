@@ -1,13 +1,7 @@
 /** @format */
 
-import type { ChatCompletion, ChatModel } from "openai/resources/index.mjs";
-import type { ChatCompletionMessageParam } from "openai/resources/index.js";
-import OpenAI from "openai";
-import { AI_MODEL_TEMPERATURE } from "../prompt/index.js";
 import {
   GitLabError,
-  OpenAIError,
-  type CommentPayload,
   type GitLabFetchHeaders,
 } from "./types.js";
 
@@ -71,45 +65,16 @@ export const fetchFileAtRef: GitLabFetchFunction<
   return await res.text();
 };
 
-export async function generateAICompletion(
-  messages: ChatCompletionMessageParam[],
-  openaiInstance: OpenAI,
-  aiModel: ChatModel,
-): Promise<ChatCompletion | OpenAIError> {
-  let completion: ChatCompletion | Error;
-
-  try {
-    completion = await openaiInstance.chat.completions.create({
-      model: aiModel,
-      temperature: AI_MODEL_TEMPERATURE,
-      stream: false,
-      messages,
-    });
-  } catch (error: any) {
-    completion = error;
-  }
-
-  if (completion instanceof Error) {
-    return new OpenAIError({
-      name: "MISSING_AI_COMPLETION",
-      message: "Failed to generate AI completion",
-      cause: completion,
-    });
-  }
-
-  return completion;
-}
-
 interface PostMergeRequestNoteParams {
   mergeRequestIid: string | number;
+  note: string;
 }
 type PostMergeRequestNoteResult = void | GitLabError;
 export const postMergeRequestNote: GitLabFetchFunction<
   PostMergeRequestNoteParams,
   PostMergeRequestNoteResult
 > = async (
-  { gitLabProjectApiUrl, headers, mergeRequestIid },
-  commentPayload: CommentPayload,
+  { gitLabProjectApiUrl, headers, mergeRequestIid, note }
 ): Promise<void | GitLabError> => {
   const commentUrl = new URL(
     `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes`,
@@ -122,7 +87,7 @@ export const postMergeRequestNote: GitLabFetchFunction<
         ...headers,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(commentPayload),
+      body: JSON.stringify({body: note}),
     });
   } catch (error: any) {
     aiComment = error;
@@ -162,7 +127,7 @@ interface SearchRepositoryParams {
   query: string;
   ref: string;
 }
-export interface SearchBlobResult {
+interface SearchBlobResult {
   path: string;
   data: string;
   startline: number;
@@ -210,7 +175,7 @@ export const searchRepository: GitLabFetchFunction<
   return (await res.json()) as SearchBlobResult[];
 };
 
-export interface MergeRequestChangesDiffRef {
+interface MergeRequestChangesDiffRef {
   base_sha?: string;
   head_sha?: string;
   start_sha?: string;
@@ -225,7 +190,7 @@ export interface MergeRequestChange {
   deleted_file?: boolean;
 }
 
-export interface MergeRequestChangesResponse {
+interface MergeRequestChangesResponse {
   changes?: MergeRequestChange[];
   diff_refs?: MergeRequestChangesDiffRef;
   overflow?: boolean;

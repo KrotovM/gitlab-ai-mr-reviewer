@@ -47,6 +47,3 @@ Example output (copy this exactly — one line, one JSON object, nothing else):
 export function getTriageSystemPrompt(profile: PromptProfile): string {
   return profile === "weak" ? WEAK : DEFAULT;
 }
-
-/** @deprecated kept for backward compatibility — use getTriageSystemPrompt("default"). */
-export const TRIAGE_SYSTEM_LINES: string[] = DEFAULT.split("\n");

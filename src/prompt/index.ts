@@ -52,9 +52,6 @@ export const DEFAULT_PROMPT_LIMITS: PromptLimits = {
 /** Max chars of each file diff sent to the triage pass (Pass 1). */
 export const DEFAULT_TRIAGE_DIFF_CHARS = 2000;
 
-export const AI_MODEL_TEMPERATURE = 0.2;
-export const AI_MAX_OUTPUT_TOKENS = 600;
-
 export interface BuildPromptParameters {
   changes: Array<{ diff: string }>;
   limits?: Partial<PromptLimits>;
