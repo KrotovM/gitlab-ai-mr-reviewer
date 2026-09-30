@@ -158,6 +158,7 @@ async function main(): Promise<void> {
   const ciApiV4Url = envs["CI_API_V4_URL"]!;
   const projectId = envs["CI_PROJECT_ID"]!;
   const mergeRequestIid = envs["CI_MERGE_REQUEST_IID"]!;
+  const gitLabProjectApiUrl = new URL(`${ciApiV4Url}/projects/${projectId}`);
 
   const headers: Record<string, string> = {};
   if (projectAccessToken != null) headers["PRIVATE-TOKEN"] = projectAccessToken;
@@ -166,7 +167,7 @@ async function main(): Promise<void> {
   try {
     logStep("Fetching merge request changes");
     const mrChanges = await fetchMergeRequestChanges({
-      gitLabBaseUrl: new URL(ciApiV4Url),
+      gitLabProjectApiUrl: gitLabProjectApiUrl,
       headers,
       projectId,
       mergeRequestIid,
@@ -200,7 +201,7 @@ async function main(): Promise<void> {
         base: mrChanges.diff_refs?.base_sha ?? "HEAD",
         head: mrChanges.diff_refs?.head_sha ?? "HEAD",
       },
-      gitLabProjectApiUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+      gitLabProjectApiUrl: gitLabProjectApiUrl,
       projectId,
       headers,
       maxFindings,
@@ -215,7 +216,7 @@ async function main(): Promise<void> {
     logStep("Posting AI review note to merge request");
     const noteRes = await postMergeRequestNote(
       {
-        gitLabBaseUrl: new URL(`${ciApiV4Url}/projects/${projectId}`),
+        gitLabProjectApiUrl: gitLabProjectApiUrl,
         headers,
         mergeRequestIid,
       },
