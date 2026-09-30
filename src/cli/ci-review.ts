@@ -218,7 +218,7 @@ function buildReviewMetadata(
       changed_files: files,
       tool_usage_guidance: [
         "If diff context is insufficient, call get_file_at_ref to read a specific file.",
-        "Use grep_repository to search for usages, definitions, or patterns across the codebase.",
+        "Use grep_repository to find usages or definitions by literal text (no regex) across the codebase.",
         "Use refs.base to inspect pre-change content and refs.head for current content.",
         "Prefer targeted searches and file fetches; avoid broad context requests.",
       ],
@@ -412,7 +412,7 @@ export async function reviewMergeRequestWithTools(params: {
       function: {
         name: TOOL_NAME_GREP,
         description:
-          "Search the repository for a keyword or pattern. Returns up to 10 matching code fragments with file paths and line numbers.",
+          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
         parameters: {
           type: "object",
           additionalProperties: false,
@@ -420,7 +420,7 @@ export async function reviewMergeRequestWithTools(params: {
             query: {
               type: "string",
               description:
-                "Search string (keyword, function name, variable, etc.).",
+                "Literal text to find, e.g. a function or variable name (no regex).",
             },
             ref: {
               type: "string",
@@ -613,7 +613,7 @@ async function runFileReviewWithTools(params: {
       function: {
         name: TOOL_NAME_GREP,
         description:
-          "Search the repository for a keyword or pattern. Returns up to 10 matching code fragments with file paths and line numbers.",
+          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
         parameters: {
           type: "object",
           additionalProperties: false,
@@ -621,7 +621,7 @@ async function runFileReviewWithTools(params: {
             query: {
               type: "string",
               description:
-                "Search string (keyword, function name, variable, etc.).",
+                "Literal text to find, e.g. a function or variable name (no regex).",
             },
             ref: {
               type: "string",
@@ -803,7 +803,7 @@ async function runVerificationWithTools(params: {
       function: {
         name: TOOL_NAME_GREP,
         description:
-          "Search the repository for a keyword or pattern. Returns up to 10 matching code fragments with file paths and line numbers.",
+          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
         parameters: {
           type: "object",
           additionalProperties: false,
@@ -811,7 +811,7 @@ async function runVerificationWithTools(params: {
             query: {
               type: "string",
               description:
-                "Search string (keyword, function name, variable, etc.).",
+                "Literal text to find, e.g. a function or variable name (no regex).",
             },
             ref: {
               type: "string",
