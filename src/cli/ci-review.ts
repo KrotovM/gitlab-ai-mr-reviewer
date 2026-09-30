@@ -29,6 +29,7 @@ import {
 } from "../gitlab/services.js";
 import { parseReviewFindings, truncateWithMarker } from "../prompt/utils.js";
 import {
+  logToolFailure,
   logToolUsageMinimal,
   MAX_FILE_TOOL_ROUNDS,
   MAX_TOOL_ROUNDS,
@@ -232,6 +233,7 @@ async function handleGetFileTool(
   argsRaw: string,
   gitLabProjectApiUrl: URL,
   headers: Record<string, string>,
+  logStep: (message: string) => void,
 ): Promise<string> {
   try {
     const parsed = JSON.parse(argsRaw) as { path?: string; ref?: string };
@@ -250,10 +252,12 @@ async function handleGetFileTool(
       ref,
     });
     if (fileText instanceof Error) {
+      logToolFailure(logStep, TOOL_NAME_GET_FILE, fileText);
       return JSON.stringify({
         ok: false,
         path,
         ref,
+        status: fileText.statusCode,
         error: fileText.message,
       });
     }
@@ -265,6 +269,7 @@ async function handleGetFileTool(
       truncated: fileText.length > MAX_TOOL_FILE_CHARS,
     });
   } catch (error: any) {
+    logToolFailure(logStep, TOOL_NAME_GET_FILE, error);
     return JSON.stringify({
       ok: false,
       error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
@@ -278,7 +283,7 @@ async function handleGrepTool(
   defaultRef: string,
   gitLabProjectApiUrl: URL,
   headers: Record<string, string>,
-  projectId: string,
+  logStep: (message: string) => void,
 ): Promise<string> {
   try {
     const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
@@ -291,13 +296,14 @@ async function handleGrepTool(
       headers,
       query,
       ref,
-      projectId,
     });
     if (results instanceof Error) {
+      logToolFailure(logStep, TOOL_NAME_GREP, results);
       return JSON.stringify({
         ok: false,
         query,
         ref,
+        status: results.statusCode,
         error: results.message,
       });
     }
@@ -308,6 +314,7 @@ async function handleGrepTool(
     }));
     return JSON.stringify({ ok: true, query, ref, matches: trimmed });
   } catch (error: any) {
+    logToolFailure(logStep, TOOL_NAME_GREP, error);
     return JSON.stringify({
       ok: false,
       error: `Failed to parse tool arguments: ${String(error?.message ?? error)}`,
@@ -347,7 +354,6 @@ export async function reviewMergeRequestWithTools(params: {
   changes: MergeRequestChange[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
-  projectId: string;
   headers: Record<string, string>;
   forceTools: boolean;
   promptProfile?: PromptProfile;
@@ -362,7 +368,6 @@ export async function reviewMergeRequestWithTools(params: {
     changes,
     refs,
     gitLabProjectApiUrl,
-    projectId,
     headers,
     forceTools,
     promptProfile = DEFAULT_PROMPT_PROFILE,
@@ -488,6 +493,7 @@ export async function reviewMergeRequestWithTools(params: {
           argsRaw,
           gitLabProjectApiUrl,
           headers,
+          logStep,
         );
       } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
@@ -495,7 +501,7 @@ export async function reviewMergeRequestWithTools(params: {
           refs.head,
           gitLabProjectApiUrl,
           headers,
-          projectId,
+          logStep,
         );
       } else {
         toolContent = JSON.stringify({
@@ -551,7 +557,6 @@ async function runFileReviewWithTools(params: {
   otherChangedFiles: string[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
-  projectId: string;
   headers: Record<string, string>;
   forceTools: boolean;
   promptProfile: PromptProfile;
@@ -568,7 +573,6 @@ async function runFileReviewWithTools(params: {
     otherChangedFiles,
     refs,
     gitLabProjectApiUrl,
-    projectId,
     headers,
     forceTools,
     promptProfile,
@@ -686,6 +690,7 @@ async function runFileReviewWithTools(params: {
           argsRaw,
           gitLabProjectApiUrl,
           headers,
+          logStep,
         );
       } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
@@ -693,7 +698,7 @@ async function runFileReviewWithTools(params: {
           refs.head,
           gitLabProjectApiUrl,
           headers,
-          projectId,
+          logStep,
         );
       } else {
         toolContent = JSON.stringify({
@@ -751,7 +756,6 @@ async function runVerificationWithTools(params: {
   baseMessages: ChatCompletionMessageParam[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
-  projectId: string;
   headers: Record<string, string>;
   forceTools: boolean;
   consolidatedDraft: string;
@@ -765,7 +769,6 @@ async function runVerificationWithTools(params: {
     baseMessages,
     refs,
     gitLabProjectApiUrl,
-    projectId,
     headers,
     forceTools,
     consolidatedDraft,
@@ -876,6 +879,7 @@ async function runVerificationWithTools(params: {
           argsRaw,
           gitLabProjectApiUrl,
           headers,
+          logStep,
         );
       } else if (toolName === TOOL_NAME_GREP) {
         toolContent = await handleGrepTool(
@@ -883,7 +887,7 @@ async function runVerificationWithTools(params: {
           refs.head,
           gitLabProjectApiUrl,
           headers,
-          projectId,
+          logStep,
         );
       } else {
         toolContent = JSON.stringify({
@@ -936,7 +940,6 @@ export async function reviewMergeRequestMultiPass(params: {
   changes: MergeRequestChange[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
-  projectId: string;
   headers: Record<string, string>;
   maxFindings: number;
   reviewConcurrency: number;
@@ -957,7 +960,6 @@ export async function reviewMergeRequestMultiPass(params: {
     changes,
     refs,
     gitLabProjectApiUrl,
-    projectId,
     headers,
     maxFindings,
     reviewConcurrency,
@@ -1087,7 +1089,6 @@ export async function reviewMergeRequestMultiPass(params: {
       changes,
       refs,
       gitLabProjectApiUrl,
-      projectId,
       headers,
       forceTools,
       promptProfile: effectiveProfile,
@@ -1150,7 +1151,6 @@ export async function reviewMergeRequestMultiPass(params: {
           otherChangedFiles: otherFiles,
           refs,
           gitLabProjectApiUrl,
-          projectId,
           headers,
           forceTools,
           promptProfile: effectiveProfile,
@@ -1252,7 +1252,6 @@ export async function reviewMergeRequestMultiPass(params: {
         baseMessages: verificationMessages,
         refs,
         gitLabProjectApiUrl,
-        projectId,
         headers,
         forceTools,
         consolidatedDraft: consolidatedText,

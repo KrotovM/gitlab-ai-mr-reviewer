@@ -22,66 +22,6 @@ type GitLabFetchFunction<
   ...rest: any[]
 ) => Promise<Result>;
 
-interface FetchPreEditFilesParams {
-  changesOldPaths: string[];
-  ref: string;
-}
-export interface OldFileVersion {
-  fileName: string;
-  fileContent: string;
-}
-type FetchPreEditFilesResult = OldFileVersion[] | GitLabError;
-export const fetchPreEditFiles: GitLabFetchFunction<
-  FetchPreEditFilesParams,
-  FetchPreEditFilesResult
-> = async ({ gitLabProjectApiUrl, headers, changesOldPaths, ref }) => {
-  const oldFilesRequestUrls = changesOldPaths.map((filePath) => {
-    const url = new URL(
-      `${gitLabProjectApiUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
-    );
-    url.searchParams.set("ref", ref);
-    return url;
-  });
-  let oldFiles: Array<PromiseSettledResult<string>> | Error;
-  try {
-    oldFiles = await Promise.allSettled(
-      oldFilesRequestUrls.map(async (url) => {
-        const res = await fetch(url, { headers: { ...headers } });
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => "");
-          throw new Error(
-            `Failed to fetch old file: ${url.toString()} (status ${res.status} ${res.statusText}, body: ${bodyText.slice(0, 500)})`,
-          );
-        }
-        return await res.text();
-      }),
-    );
-  } catch (error: any) {
-    oldFiles = error;
-  }
-
-  if (oldFiles instanceof Error) {
-    return new GitLabError({
-      name: "MISSING_OLD_FILES",
-      message: "Failed to fetch old files",
-      cause: {
-        message: oldFiles.message,
-        stack: oldFiles.stack,
-      },
-    });
-  }
-
-  return oldFiles.reduce<OldFileVersion[]>((acc, file, index) => {
-    if (file.status === "fulfilled") {
-      acc.push({
-        fileName: changesOldPaths[index]!,
-        fileContent: file.value,
-      });
-    }
-    return acc;
-  }, []);
-};
-
 interface FetchFileAtRefParams {
   filePath: string;
   ref: string;
@@ -221,7 +161,6 @@ export const postMergeRequestNote: GitLabFetchFunction<
 interface SearchRepositoryParams {
   query: string;
   ref: string;
-  projectId: string | number;
 }
 export interface SearchBlobResult {
   path: string;
@@ -293,7 +232,6 @@ export interface MergeRequestChangesResponse {
 }
 
 interface FetchMergeRequestChangesParams {
-  projectId: string | number;
   mergeRequestIid: string | number;
 }
 type FetchMergeRequestChangesResult = MergeRequestChangesResponse | GitLabError;
