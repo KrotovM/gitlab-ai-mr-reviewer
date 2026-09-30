@@ -41,7 +41,7 @@ Or include it as a [CI/CD component from the GitLab Catalog](https://gitlab.com/
 
 ```yaml
 include:
-  - component: gitlab.com/KrotovM/gitlab-ai-review/review@1.0.2
+  - component: gitlab.com/KrotovM/gitlab-ai-review/review@1.0.3
     inputs:
       args: "--include-artifacts"
 ```
