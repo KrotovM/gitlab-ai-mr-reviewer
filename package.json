@@ -16,8 +16,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build:ts": "tsc",
-    "prepublishOnly": "pnpm build:ts"
+    "prepare": "tsc"
   },
   "keywords": [
     "gitlab",
