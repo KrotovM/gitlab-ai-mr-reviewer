@@ -54,6 +54,11 @@ export function hasIncludeArtifactsFlag(argv: string[]): boolean {
   return args.has("--include-artifacts");
 }
 
+export function hasInlineCommentsFlag(argv: string[]): boolean {
+  const args = new Set(argv.slice(2));
+  return args.has("--inline-comments");
+}
+
 export function parseIgnoreExtensions(argv: string[]): string[] {
   const parsed: string[] = [];
   const args = argv.slice(2);

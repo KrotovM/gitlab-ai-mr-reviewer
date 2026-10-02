@@ -117,6 +117,20 @@ export function parseReviewFindings(input: string): ReviewFinding[] {
         if (m != null) {
           file = m[1]!.trim();
           line = m[2]!.trim();
+          // renderReviewFinding puts the why on the very next line, even when
+          // it starts with `_` (e.g. `__init__`), which the fallback below skips.
+          // Separators and whole-line italics (the disclaimer) are never a why.
+          const next = lines[j + 1]?.trim() ?? "";
+          if (
+            why == null &&
+            next !== "" &&
+            !/^(-{3,}|_.*_$)/.test(next) &&
+            matchHeader(next) == null
+          ) {
+            why = next.match(whyRe)?.[1]?.trim() ?? next;
+            j += 2;
+            continue;
+          }
           j += 1;
           continue;
         }
@@ -166,6 +180,16 @@ export function parseReviewFindings(input: string): ReviewFinding[] {
   return findings;
 }
 
+const SEVERITY_LABEL: Record<"high" | "medium", string> = {
+  high: "🔴 High",
+  medium: "🟠 Medium",
+};
+
+/** One finding as rendered in the MR comment (and in inline diff threads). */
+export function renderReviewFinding(f: ReviewFinding): string {
+  return `- **${SEVERITY_LABEL[f.severity]} — ${f.title}**  \n  \`${f.file}:${f.line}\`  \n  ${f.why}`;
+}
+
 export function normalizeReviewFindingsMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
   if (normalized === "" || normalized === NO_ISSUES_SENTENCE) return normalized;
@@ -173,14 +197,5 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
   const findings = parseReviewFindings(normalized);
   if (findings.length === 0) return normalized;
 
-  const severityLabel: Record<"high" | "medium", string> = {
-    high: "🔴 High",
-    medium: "🟠 Medium",
-  };
-  return findings
-    .map(
-      (f) =>
-        `- **${severityLabel[f.severity]} — ${f.title}**  \n  \`${f.file}:${f.line}\`  \n  ${f.why}`,
-    )
-    .join("\n\n");
+  return findings.map(renderReviewFinding).join("\n\n");
 }
