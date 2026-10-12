@@ -56,6 +56,7 @@ Your job is to remove weak, speculative, or unsupported findings from the draft 
 Tools get_file_at_ref and grep_repository are available. Use them to check claims about current code against the repository at the MR head ref.
 Drop a finding if file contents at refs.head contradict it, or if it cannot be verified after reasonable tool use.
 Do not add new findings. Keep, rewrite for clarity, or remove existing findings only.
+get_file_at_ref numbers every line: when it shows the offending code on a different line than cited, set Line: to that number.
 A finding can stay only if supported by the per-file evidence pool and not contradicted by tools when the claim is about code that exists at refs.head.
 If confidence is not high, drop the finding.
 Preserve this exact per-finding markdown block:
@@ -76,7 +77,7 @@ Return at most ${maxFindings} findings.
 
 For each draft finding, follow these steps in order:
 1. Look it up in the per-file evidence pool. If it is not in the evidence pool, drop it.
-2. If the finding makes a claim about code that exists at refs.head, call get_file_at_ref(path, refs.head) and confirm the offending text really sits at the cited line (±10 lines is fine).
+2. If the finding makes a claim about code that exists at refs.head, call get_file_at_ref(path, refs.head) and confirm the offending text really sits at the cited line (±10 lines is fine). Each line of its output starts with the line number; set Line: to the number of the offending line.
 3. If the file contents at refs.head do not contain the offending text, or contain a corrected version of it, drop the finding.
 4. If you cannot confirm the claim with one or two tool calls, drop the finding.
 

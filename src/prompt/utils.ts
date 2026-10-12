@@ -48,6 +48,30 @@ export function truncateWithMarker(
   return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`;
 }
 
+/** Prefixes added and context lines of a unified diff with their line number in
+ *  the new file (removed lines get a blank column), so the model cites exact
+ *  lines instead of counting from @@ headers. Same rules as mapNewLines. */
+export function numberDiffLines(diff: string): string {
+  const rows: Array<[number | null, string]> = [];
+  let newLine = 0;
+  for (const text of diff.split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (hunk != null) newLine = Number(hunk[1]);
+    const numbered = hunk == null && newLine > 0 && /^[+ ]/.test(text);
+    rows.push([numbered ? newLine++ : null, text]);
+  }
+  const width = String(Math.max(1, newLine - 1)).length;
+  return rows
+    .map(([n, text]) =>
+      n != null
+        ? `${String(n).padStart(width)} ${text}`
+        : text.startsWith("-")
+          ? `${" ".repeat(width)} ${text}`
+          : text,
+    )
+    .join("\n");
+}
+
 export function sanitizeGitLabMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
   // If the model forgets to close a fenced code block, GitLab will render the rest (incl. disclaimer) inside it.
@@ -117,6 +141,20 @@ export function parseReviewFindings(input: string): ReviewFinding[] {
         if (m != null) {
           file = m[1]!.trim();
           line = m[2]!.trim();
+          // renderReviewFinding puts the why on the very next line, even when
+          // it starts with `_` (e.g. `__init__`), which the fallback below skips.
+          // Separators and whole-line italics (the disclaimer) are never a why.
+          const next = lines[j + 1]?.trim() ?? "";
+          if (
+            why == null &&
+            next !== "" &&
+            !/^(-{3,}|_.*_$)/.test(next) &&
+            matchHeader(next) == null
+          ) {
+            why = next.match(whyRe)?.[1]?.trim() ?? next;
+            j += 2;
+            continue;
+          }
           j += 1;
           continue;
         }
@@ -166,6 +204,16 @@ export function parseReviewFindings(input: string): ReviewFinding[] {
   return findings;
 }
 
+const SEVERITY_LABEL: Record<"high" | "medium", string> = {
+  high: "🔴 High",
+  medium: "🟠 Medium",
+};
+
+/** One finding as rendered in the MR comment (and in inline diff threads). */
+export function renderReviewFinding(f: ReviewFinding): string {
+  return `- **${SEVERITY_LABEL[f.severity]} — ${f.title}**  \n  \`${f.file}:${f.line}\`  \n  ${f.why}`;
+}
+
 export function normalizeReviewFindingsMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
   if (normalized === "" || normalized === NO_ISSUES_SENTENCE) return normalized;
@@ -173,14 +221,5 @@ export function normalizeReviewFindingsMarkdown(input: string): string {
   const findings = parseReviewFindings(normalized);
   if (findings.length === 0) return normalized;
 
-  const severityLabel: Record<"high" | "medium", string> = {
-    high: "🔴 High",
-    medium: "🟠 Medium",
-  };
-  return findings
-    .map(
-      (f) =>
-        `- **${severityLabel[f.severity]} — ${f.title}**  \n  \`${f.file}:${f.line}\`  \n  ${f.why}`,
-    )
-    .join("\n\n");
+  return findings.map(renderReviewFinding).join("\n\n");
 }

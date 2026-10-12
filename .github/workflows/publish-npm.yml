@@ -31,12 +31,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Debug npm identity
-        run: |
-          node -v
-          npm -v
-          npm whoami || true
-
       - name: Publish
         run: npm publish --access public --provenance
 

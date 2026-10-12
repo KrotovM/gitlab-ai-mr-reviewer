@@ -15,6 +15,7 @@ import {
   hasForceToolsFlag,
   hasIncludeArtifactsFlag,
   hasIgnoredExtension,
+  hasInlineCommentsFlag,
   parseIgnoreExtensions,
   parseNumberFlag,
   parsePromptLimits,
@@ -23,6 +24,7 @@ import {
   requireEnvs,
 } from "./cli/args.js";
 import { reviewMergeRequestMultiPass } from "./cli/ci-review.js";
+import { postInlineFindings } from "./cli/inline-comments.js";
 import {
   fetchMergeRequestChanges,
   postMergeRequestNote,
@@ -50,6 +52,7 @@ Debug:
   --triage-diff-chars=2000   Max chars per file diff in triage pass (Pass 1).
   --max-findings=5          Max findings in final review (CI multi-pass only).
   --max-review-concurrency=2  Parallel per-file review calls (CI multi-pass only).
+  --inline-comments  Post findings on changed lines as resolvable diff threads; the rest stays in the summary comment.
 
 Env vars:
   OPENAI_API_KEY (required)  OpenAI API key.
@@ -72,6 +75,7 @@ CI-only env vars (provided by GitLab):
 const DEBUG_MODE = hasDebugFlag(process.argv);
 const FORCE_TOOLS = hasForceToolsFlag(process.argv);
 const INCLUDE_ARTIFACTS = hasIncludeArtifactsFlag(process.argv);
+const INLINE_COMMENTS = hasInlineCommentsFlag(process.argv);
 
 function logStep(message: string): void {
   process.stdout.write(`${message}\n`);
@@ -212,13 +216,25 @@ async function main(): Promise<void> {
       debugRecordWriter,
     });
 
+    const note = INLINE_COMMENTS
+      ? await postInlineFindings({
+          answer,
+          changes: filteredChanges,
+          diffRefs: mrChanges.diff_refs,
+          gitLabProjectApiUrl,
+          headers,
+          mergeRequestIid,
+          logStep,
+        })
+      : answer;
+
     logStep("Posting AI review note to merge request");
     const noteRes = await postMergeRequestNote(
       {
         gitLabProjectApiUrl: gitLabProjectApiUrl,
         headers,
         mergeRequestIid,
-        note: answer,
+        note,
       },
     );
     if (noteRes instanceof Error) throw noteRes;
