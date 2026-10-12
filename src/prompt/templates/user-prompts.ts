@@ -10,6 +10,9 @@ type TriageFileInputTemplate = {
   diff: string;
 };
 
+const LINE_NUMBERS_NOTE =
+  "Each diff line starts with its line number in the new file (removed lines have none); use these numbers for Line:.";
+
 export function buildMainReviewUserContent(params: {
   stats: string;
   toolNote: string;
@@ -17,6 +20,7 @@ export function buildMainReviewUserContent(params: {
 }): string {
   const { stats, toolNote, changesText } = params;
   return `Review the following code changes (git diff format). ${stats}
+${LINE_NUMBERS_NOTE}
 ${toolNote}
 
 Changes:
@@ -60,6 +64,7 @@ ${otherFilesNote}
 ${toolNote}
 
 File: ${filePath}
+${LINE_NUMBERS_NOTE}
 Diff:
 ${fileDiff}
 

@@ -1,5 +1,6 @@
 /** @format */
 
+import { DISCLAIMER } from "../prompt/index.js";
 import { isEmptyReviewBody } from "../prompt/profile.js";
 import {
   parseReviewFindings,
@@ -210,7 +211,7 @@ export async function postInlineFindings(params: {
 
     const posted: ReviewFinding[] = [];
     for (const { finding, position } of plan.post) {
-      const body = `${renderReviewFinding(finding)}\n\n${INLINE_MARKER}`;
+      const body = `${renderReviewFinding(finding)}\n\n---\n_${DISCLAIMER}_\n\n${INLINE_MARKER}`;
       const res = await createMergeRequestDiscussion({ ...api, body, position });
       // A rejected position leaves the finding in the summary comment.
       if (res instanceof Error) logToolFailure(logStep, "inline_comments", res);

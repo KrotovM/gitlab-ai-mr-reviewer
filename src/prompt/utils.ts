@@ -48,6 +48,30 @@ export function truncateWithMarker(
   return `${value.slice(0, maxChars)}\n\n[... ${markerLabel} truncated, omitted ${omitted} chars ...]`;
 }
 
+/** Prefixes added and context lines of a unified diff with their line number in
+ *  the new file (removed lines get a blank column), so the model cites exact
+ *  lines instead of counting from @@ headers. Same rules as mapNewLines. */
+export function numberDiffLines(diff: string): string {
+  const rows: Array<[number | null, string]> = [];
+  let newLine = 0;
+  for (const text of diff.split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (hunk != null) newLine = Number(hunk[1]);
+    const numbered = hunk == null && newLine > 0 && /^[+ ]/.test(text);
+    rows.push([numbered ? newLine++ : null, text]);
+  }
+  const width = String(Math.max(1, newLine - 1)).length;
+  return rows
+    .map(([n, text]) =>
+      n != null
+        ? `${String(n).padStart(width)} ${text}`
+        : text.startsWith("-")
+          ? `${" ".repeat(width)} ${text}`
+          : text,
+    )
+    .join("\n");
+}
+
 export function sanitizeGitLabMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
   // If the model forgets to close a fenced code block, GitLab will render the rest (incl. disclaimer) inside it.

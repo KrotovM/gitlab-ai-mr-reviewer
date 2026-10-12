@@ -111,7 +111,7 @@ With `--inline-comments`, each finding whose line falls inside the MR diff becom
 - A finding is not posted again when an AI thread already sits within 3 lines of it on unchanged code — open or resolved, so resolving a false positive dismisses it.
 - An open AI thread whose code changed (GitLab shows it as outdated) is resolved automatically with a short reply, unless someone replied to it; if you reopen it afterwards, later runs leave it alone. If the review reports the issue again, it is posted as a new thread. GitLab's own **Automatically resolve merge request diff threads when they become outdated** setting does this for every thread.
 
-Turn on **Settings → Merge requests → All threads must be resolved** to make AI findings block the merge until someone fixes or dismisses them. Line numbers come from the model and are approximate, so a thread can land a line or two away from the issue. Resolving threads needs a token with at least the Developer role.
+Turn on **Settings → Merge requests → All threads must be resolved** to make AI findings block the merge until someone fixes or dismisses them. Line numbers come from the model, which sees numbered diffs and files, so a thread can still occasionally land a line away from the issue. Resolving threads needs a token with at least the Developer role.
 
 ## Benchmark
 
