@@ -7,7 +7,7 @@
 [![license](https://img.shields.io/npm/l/@krotovm/gitlab-ai-review)](https://github.com/KrotovM/gitlab-ai-mr-reviewer/blob/main/LICENSE)
 [![GitLab CI/CD Catalog](https://img.shields.io/gitlab/v/release/KrotovM/gitlab-ai-review?label=GitLab%20CI%2FCD%20Catalog&color=fc6d26)](https://gitlab.com/explore/catalog/KrotovM/gitlab-ai-review)
 
-Gitlab AI Code Review is a CLI tool that leverages OpenAI models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
+Gitlab AI Code Review is a CLI tool that leverages OpenAI or Anthropic (Claude) models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
 
 ![AI review comment posted on a GitLab merge request](docs/review.png)
 
@@ -72,9 +72,11 @@ The HTML artifact breaks the run down per pass — tokens, durations, triage dec
 
 Set these in your project/group CI settings:
 
-- `OPENAI_API_KEY` (required)
+- `AI_PROVIDER` (optional, default: `openai`; one of `openai` \| `anthropic`)
+- `OPENAI_API_KEY` (required for `openai`)
 - `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
-- `AI_MODEL` (optional, default: `gpt-4o-mini`; example: `gpt-4o`)
+- `ANTHROPIC_API_KEY` (required for `anthropic`)
+- `AI_MODEL` (optional, default: `gpt-4o-mini` for `openai`, `claude-opus-5-5` for `anthropic`; examples: `gpt-4o`, `claude-sonnet-5-5`)
 - `AI_PROMPT_PROFILE` (optional, default: `default`; one of `default` \| `weak`). Use `weak` for small or heavily-quantized models (≤ ~7B, local Ollama, etc.). The `weak` profile uses shorter system prompts, positive rules instead of negations, and inline few-shot examples for triage / per-file review / consolidation / verification, which dramatically improves output-format adherence on weak models. When the variable is not set, the profile is auto-detected: if the triage pass returns unparseable JSON with `default` prompts, triage is retried once with `weak` and, on success, the whole run continues with it. Set the variable explicitly to pin a profile and disable auto-detection.
 - `PROJECT_ACCESS_TOKEN` (required; project or personal access token with `api` scope — `CI_JOB_TOKEN` can't post MR comments or use the search API)
 - `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
@@ -82,6 +84,8 @@ Set these in your project/group CI settings:
 - `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `ai-review-report.html`; used with `--include-artifacts`)
 
 `OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
+
+With `AI_PROVIDER=anthropic` the review calls the Anthropic Messages API directly (`ANTHROPIC_BASE_URL` overrides the endpoint the same way). Tool rounds use prompt caching, and a request declined by Claude's safety classifiers is re-run server-side on Anthropic's recommended fallback model. `--force-tools` is ignored there (Claude Opus/Sonnet 5.5 reject forced tool calls).
 
 GitLab provides these automatically in Merge Request pipelines:
 
