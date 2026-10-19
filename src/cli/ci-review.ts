@@ -1,8 +1,9 @@
 /** @format */
 
+import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import type { ChatModel } from "openai/resources/index.mjs";
 import type { ChatCompletionMessageParam } from "openai/resources/index.mjs";
+import { createAnthropicCompletion } from "./anthropic.js";
 import {
   buildAnswer,
   buildConsolidatePrompt,
@@ -130,13 +131,13 @@ async function appendDebugDump(
 }
 
 async function createCompletionWithDebug(params: {
-  openaiInstance: OpenAI;
+  llm: OpenAI | Anthropic;
   requestLabel: string;
   request: any;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
 }): Promise<any> {
-  const { openaiInstance, requestLabel, request, debugDumpFile, debugRecordWriter } =
+  const { llm, requestLabel, request, debugDumpFile, debugRecordWriter } =
     params;
   await appendDebugDump(debugDumpFile, debugRecordWriter, {
     kind: "openai_request",
@@ -149,14 +150,20 @@ async function createCompletionWithDebug(params: {
   // forever without the explicit AbortSignal deadline.
   const { stream: _stream, ...createParams } = request;
   const attempt = (withUsage: boolean) =>
-    openaiInstance.chat.completions
-      .stream(
-        withUsage
-          ? { ...createParams, stream_options: { include_usage: true } }
-          : createParams,
-        { signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS) },
-      )
-      .finalChatCompletion();
+    llm instanceof Anthropic
+      ? createAnthropicCompletion(
+          llm,
+          createParams,
+          AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
+        )
+      : llm.chat.completions
+          .stream(
+            withUsage
+              ? { ...createParams, stream_options: { include_usage: true } }
+              : createParams,
+            { signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS) },
+          )
+          .finalChatCompletion();
   try {
     let completion: any;
     try {
@@ -364,8 +371,8 @@ async function mapWithConcurrency<T, R>(
 }
 
 async function reviewMergeRequestWithTools(params: {
-  openaiInstance: OpenAI;
-  aiModel: ChatModel;
+  llm: OpenAI | Anthropic;
+  aiModel: string;
   promptLimits: PromptLimits;
   changes: MergeRequestChange[];
   refs: { base: string; head: string };
@@ -378,7 +385,7 @@ async function reviewMergeRequestWithTools(params: {
   debugRecordWriter?: DebugRecordWriter;
 }): Promise<string> {
   const {
-    openaiInstance,
+    llm,
     aiModel,
     promptLimits,
     changes,
@@ -459,7 +466,7 @@ async function reviewMergeRequestWithTools(params: {
       `Single-pass round ${round + 1}/${MAX_TOOL_ROUNDS}: requesting model response...`,
     );
     const completion = await createCompletionWithDebug({
-      openaiInstance,
+      llm,
       requestLabel: `main_review_round_${round + 1}`,
       debugDumpFile,
       debugRecordWriter,
@@ -550,7 +557,7 @@ async function reviewMergeRequestWithTools(params: {
   });
   logStep("Single-pass tool-call limit reached. Requesting final answer.");
   const finalCompletion = await createCompletionWithDebug({
-    openaiInstance,
+    llm,
     requestLabel: "main_review_final_after_tool_limit",
     debugDumpFile,
     debugRecordWriter,
@@ -565,8 +572,8 @@ async function reviewMergeRequestWithTools(params: {
 }
 
 async function runFileReviewWithTools(params: {
-  openaiInstance: OpenAI;
-  aiModel: ChatModel;
+  llm: OpenAI | Anthropic;
+  aiModel: string;
   filePath: string;
   fileDiff: string;
   summary: string;
@@ -581,7 +588,7 @@ async function runFileReviewWithTools(params: {
   debugRecordWriter?: DebugRecordWriter;
 }): Promise<string> {
   const {
-    openaiInstance,
+    llm,
     aiModel,
     filePath,
     fileDiff,
@@ -656,7 +663,7 @@ async function runFileReviewWithTools(params: {
 
   for (let round = 0; round < MAX_FILE_TOOL_ROUNDS; round += 1) {
     const completion = await createCompletionWithDebug({
-      openaiInstance,
+      llm,
       requestLabel: `file_review_${filePath}_round_${round + 1}`,
       debugDumpFile,
       debugRecordWriter,
@@ -748,7 +755,7 @@ async function runFileReviewWithTools(params: {
       "Tool-call limit reached. Provide your final review now without any tool calls.",
   });
   const final = await createCompletionWithDebug({
-    openaiInstance,
+    llm,
     requestLabel: `file_review_${filePath}_final_after_tool_limit`,
     debugDumpFile,
     debugRecordWriter,
@@ -767,8 +774,8 @@ function draftHasStructuredFindings(consolidatedText: string): boolean {
 }
 
 async function runVerificationWithTools(params: {
-  openaiInstance: OpenAI;
-  aiModel: ChatModel;
+  llm: OpenAI | Anthropic;
+  aiModel: string;
   baseMessages: ChatCompletionMessageParam[];
   refs: { base: string; head: string };
   gitLabProjectApiUrl: URL;
@@ -780,7 +787,7 @@ async function runVerificationWithTools(params: {
   debugRecordWriter?: DebugRecordWriter;
 }): Promise<any> {
   const {
-    openaiInstance,
+    llm,
     aiModel,
     baseMessages,
     refs,
@@ -848,7 +855,7 @@ async function runVerificationWithTools(params: {
 
   for (let round = 0; round < MAX_VERIFICATION_TOOL_ROUNDS; round += 1) {
     const completion = await createCompletionWithDebug({
-      openaiInstance,
+      llm,
       requestLabel: `verification_pass_round_${round + 1}`,
       debugDumpFile,
       debugRecordWriter,
@@ -935,7 +942,7 @@ async function runVerificationWithTools(params: {
     content: `Tool-call limit reached (${MAX_VERIFICATION_TOOL_ROUNDS}). Do not call tools. Output only the verified findings in the required format.`,
   });
   return createCompletionWithDebug({
-    openaiInstance,
+    llm,
     requestLabel: "verification_pass_final_after_tool_limit",
     debugDumpFile,
     debugRecordWriter,
@@ -949,8 +956,8 @@ async function runVerificationWithTools(params: {
 }
 
 export async function reviewMergeRequestMultiPass(params: {
-  openaiInstance: OpenAI;
-  aiModel: ChatModel;
+  llm: OpenAI | Anthropic;
+  aiModel: string;
   promptLimits: PromptLimits;
   triageDiffChars: number;
   changes: MergeRequestChange[];
@@ -969,7 +976,7 @@ export async function reviewMergeRequestMultiPass(params: {
   debugRecordWriter?: DebugRecordWriter;
 }): Promise<string> {
   const {
-    openaiInstance,
+    llm,
     aiModel,
     promptLimits,
     triageDiffChars,
@@ -1011,7 +1018,7 @@ export async function reviewMergeRequestMultiPass(params: {
   let triageParseError: string | null = null;
   try {
     const triageCompletion = await createCompletionWithDebug({
-      openaiInstance,
+      llm,
       requestLabel: "triage_pass",
       debugDumpFile,
       debugRecordWriter,
@@ -1052,7 +1059,7 @@ export async function reviewMergeRequestMultiPass(params: {
     );
     try {
       const weakTriageCompletion = await createCompletionWithDebug({
-        openaiInstance,
+        llm,
         requestLabel: "triage_pass_weak_retry",
         debugDumpFile,
         debugRecordWriter,
@@ -1099,7 +1106,7 @@ export async function reviewMergeRequestMultiPass(params: {
     }
     logStep("Falling back to single-pass pipeline.");
     return await reviewMergeRequestWithTools({
-      openaiInstance,
+      llm,
       aiModel,
       promptLimits,
       changes,
@@ -1155,7 +1162,7 @@ export async function reviewMergeRequestMultiPass(params: {
       let findings: string;
       try {
         findings = await runFileReviewWithTools({
-          openaiInstance,
+          llm,
           aiModel,
           filePath: change.new_path,
           fileDiff: truncateWithMarker(
@@ -1235,7 +1242,7 @@ export async function reviewMergeRequestMultiPass(params: {
   }
   try {
     const consolidateCompletion = await createCompletionWithDebug({
-      openaiInstance,
+      llm,
       requestLabel: "consolidate_pass",
       debugDumpFile,
       debugRecordWriter,
@@ -1262,7 +1269,7 @@ export async function reviewMergeRequestMultiPass(params: {
     });
     try {
       const verificationCompletion = await runVerificationWithTools({
-        openaiInstance,
+        llm,
         aiModel,
         baseMessages: verificationMessages,
         refs,

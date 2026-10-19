@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** @format */
 
+import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import type { ChatModel } from "openai/resources/index.mjs";
 import { readFile } from "node:fs/promises";
 import {
   DEFAULT_MAX_FINDINGS,
@@ -23,6 +23,7 @@ import {
   readPromptProfileFromEnv,
   requireEnvs,
 } from "./cli/args.js";
+import { DEFAULT_ANTHROPIC_MODEL } from "./cli/anthropic.js";
 import { reviewMergeRequestMultiPass } from "./cli/ci-review.js";
 import { postInlineFindings } from "./cli/inline-comments.js";
 import {
@@ -44,7 +45,7 @@ Usage:
 Debug:
   --debug        Print full error details (stack, API error fields).
   --include-artifacts  Generate local HTML artifact without printing payloads to console.
-  --force-tools  Force at least one tool-call round in tool-enabled review paths.
+  --force-tools  Force at least one tool-call round in tool-enabled review paths (openai only).
   --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock
   --max-diffs=50
   --max-diff-chars=16000
@@ -55,9 +56,11 @@ Debug:
   --inline-comments  Post findings on changed lines as resolvable diff threads; the rest stays in the summary comment.
 
 Env vars:
-  OPENAI_API_KEY (required)  OpenAI API key.
+  AI_PROVIDER   (optional)  "openai" | "anthropic". Default: openai.
+  OPENAI_API_KEY (required for openai)  OpenAI API key.
   OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.
-  AI_MODEL      (optional)  OpenAI chat model, e.g. gpt-4o. Default: gpt-4o-mini.
+  ANTHROPIC_API_KEY (required for anthropic)  Anthropic API key.
+  AI_MODEL      (optional)  Chat model. Default: gpt-4o-mini (openai), ${DEFAULT_ANTHROPIC_MODEL} (anthropic).
   AI_REVIEW_CONCURRENCY (optional)  Same as --max-review-concurrency; the flag wins.
   AI_PROMPT_PROFILE (optional)  Prompt style: "default" | "weak". Default: default.
                               Use "weak" for small/quantized models — shorter prompts,
@@ -127,7 +130,16 @@ async function main(): Promise<void> {
       : DEFAULT_REVIEW_CONCURRENCY,
     1,
   );
-  const aiModel = envOrDefault("AI_MODEL", "gpt-4o-mini") as ChatModel;
+  const provider = envOrDefault("AI_PROVIDER", "openai").toLowerCase();
+  if (provider !== "openai" && provider !== "anthropic") {
+    throw new Error(
+      `AI_PROVIDER must be "openai" or "anthropic", got "${provider}".`,
+    );
+  }
+  const aiModel = envOrDefault(
+    "AI_MODEL",
+    provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : "gpt-4o-mini",
+  );
   const promptProfile = readPromptProfileFromEnv();
   const allowProfileAutoDemote = envOrUndefined("AI_PROMPT_PROFILE") == null;
   logStep(
@@ -148,8 +160,10 @@ async function main(): Promise<void> {
 
   const projectAccessToken =
     envOrUndefined("PROJECT_ACCESS_TOKEN") ?? envOrUndefined("GITLAB_TOKEN");
+  const apiKeyEnv =
+    provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
   const gitlabRequired: string[] = [
-    "OPENAI_API_KEY",
+    apiKeyEnv,
     "CI_API_V4_URL",
     "CI_PROJECT_ID",
     "CI_MERGE_REQUEST_IID",
@@ -157,7 +171,7 @@ async function main(): Promise<void> {
   // CI_JOB_TOKEN can't post MR notes or call the search API, so a real token is required.
   if (projectAccessToken == null) gitlabRequired.push("PROJECT_ACCESS_TOKEN");
   const envs = requireEnvs(gitlabRequired);
-  const openaiApiKey = envs["OPENAI_API_KEY"]!;
+  const apiKey = envs[apiKeyEnv]!;
   const ciApiV4Url = envs["CI_API_V4_URL"]!;
   // MR endpoints live in the MR's target project; in fork pipelines CI_PROJECT_ID is the fork.
   const projectId =
@@ -193,10 +207,13 @@ async function main(): Promise<void> {
     }
 
     logStep(
-      `Requesting AI review with model: ${aiModel} (multi-pass pipeline)`,
+      `Requesting AI review with model: ${aiModel} (${provider}, multi-pass pipeline)`,
     );
     const answer = await reviewMergeRequestMultiPass({
-      openaiInstance: new OpenAI({ apiKey: openaiApiKey }),
+      llm:
+        provider === "anthropic"
+          ? new Anthropic({ apiKey })
+          : new OpenAI({ apiKey }),
       aiModel,
       promptLimits,
       triageDiffChars,

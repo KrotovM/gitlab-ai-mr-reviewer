@@ -24,6 +24,8 @@
     "merge-request",
     "code-review",
     "openai",
+    "anthropic",
+    "claude",
     "cli"
   ],
   "author": "KrotovM",
@@ -40,6 +42,7 @@
   },
   "homepage": "https://github.com/KrotovM/gitlab-ai-mr-reviewer#readme",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
     "openai": "^6.33.0"
   },
   "devDependencies": {
