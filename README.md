@@ -16,6 +16,7 @@ Gitlab AI Code Review is a CLI tool that leverages OpenAI or Anthropic (Claude) 
 - Automatically reviews code changes in GitLab repositories
 - Provides feedback on bugs and optimization opportunities
 - Generates Markdown-formatted responses for easy readability in GitLab as merge request comment
+- Follows your project's review rules from [`REVIEW.md`](#review-rules-reviewmd)
 
 ## Usage
 
@@ -116,6 +117,26 @@ With `--inline-comments`, each finding whose line falls inside the MR diff becom
 - An open AI thread whose code changed (GitLab shows it as outdated) is resolved automatically with a short reply, unless someone replied to it; if you reopen it afterwards, later runs leave it alone. If the review reports the issue again, it is posted as a new thread. GitLab's own **Automatically resolve merge request diff threads when they become outdated** setting does this for every thread.
 
 Turn on **Settings → Merge requests → All threads must be resolved** to make AI findings block the merge until someone fixes or dismisses them. Line numbers come from the model, which sees numbered diffs and files, so a thread can still occasionally land a line away from the issue. Resolving threads needs a token with at least the Developer role.
+
+## Review rules (REVIEW.md)
+
+Commit a `REVIEW.md` to the repository root to tell the reviewer what matters in your project. It is plain Markdown with no schema — the same file [Claude Code Review](https://code.claude.com/docs/en/code-review-customize), [Qodo](https://docs.qodo.ai/governance/use-review-md) and other review tools read, so one file serves all of them:
+
+```markdown
+## Do not report
+- `src/gen/**` and lock files (generated)
+- formatting and types (CI checks them)
+
+## Always check
+- SQL queries filter by tenant
+- no emails or request bodies in log lines
+```
+
+- It is read from the MR's **target branch**, never from the MR itself. A `REVIEW.md` that the MR changes shows up in the diff as code to review, and the model is told not to follow that copy. Merge `REVIEW.md` changes first, and protect the target branch.
+- Every pass gets it (triage, per-file review, consolidation, verification). It changes what gets reported and how severe it is, not the format of the review comment.
+- It steers the model; it is not an enforced policy. Don't rely on it for security or compliance checks.
+- Only the first 8,000 characters are used; the job log says when a file is longer. The file is sent with every model call, so keep it short.
+- Without `REVIEW.md` the review runs as before.
 
 ## Benchmark
 

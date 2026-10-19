@@ -202,6 +202,7 @@ export interface MergeRequestChange {
 interface MergeRequestChangesResponse {
   changes?: MergeRequestChange[];
   diff_refs?: MergeRequestChangesDiffRef;
+  target_branch?: string;
   overflow?: boolean;
 }
 
