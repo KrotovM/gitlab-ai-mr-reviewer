@@ -24,7 +24,10 @@ import {
   requireEnvs,
 } from "./cli/args.js";
 import { DEFAULT_ANTHROPIC_MODEL } from "./cli/anthropic.js";
-import { reviewMergeRequestMultiPass } from "./cli/ci-review.js";
+import {
+  loadReviewInstructions,
+  reviewMergeRequestMultiPass,
+} from "./cli/ci-review.js";
 import { postInlineFindings } from "./cli/inline-comments.js";
 import {
   fetchMergeRequestChanges,
@@ -206,6 +209,13 @@ async function main(): Promise<void> {
       return;
     }
 
+    const reviewInstructions = await loadReviewInstructions({
+      gitLabProjectApiUrl,
+      headers,
+      mr: mrChanges,
+      logStep,
+    });
+
     logStep(
       `Requesting AI review with model: ${aiModel} (${provider}, multi-pass pipeline)`,
     );
@@ -229,6 +239,7 @@ async function main(): Promise<void> {
       forceTools: FORCE_TOOLS,
       promptProfile,
       allowProfileAutoDemote,
+      reviewInstructions,
       loggers,
       debugRecordWriter,
     });
