@@ -15,6 +15,7 @@ import {
   DISCLAIMER,
   extractCompletionText,
   isEmptyReviewBody,
+  MAX_REVIEW_INSTRUCTIONS_CHARS,
   NO_FINDINGS_SENTENCE,
   parseTriageResponseDetailed,
   parseTriageResponse,
@@ -23,6 +24,7 @@ import {
   type TriageFileInput,
   type TriageParseFailureReason,
   type TriageFileVerdict,
+  withReviewInstructions,
 } from "../prompt/index.js";
 import {
   fetchFileAtRef,
@@ -370,6 +372,41 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+/** Reads REVIEW.md from the MR's target branch, never from the MR itself, so an
+ *  MR can't relax the rules it is reviewed under. Missing file → undefined. */
+export async function loadReviewInstructions(params: {
+  gitLabProjectApiUrl: URL;
+  headers: Record<string, string>;
+  mr: { target_branch?: string; diff_refs?: { start_sha?: string } };
+  logStep: (message: string) => void;
+}): Promise<string | undefined> {
+  const { gitLabProjectApiUrl, headers, mr, logStep } = params;
+  // start_sha is the target branch tip the diff was built against; base_sha is
+  // only the merge-base and may still hold rules the target branch dropped.
+  const ref = mr.target_branch ?? mr.diff_refs?.start_sha;
+  if (ref == null) return undefined;
+  const text = await fetchFileAtRef({
+    gitLabProjectApiUrl,
+    headers,
+    filePath: "REVIEW.md",
+    ref,
+  });
+  if (text instanceof Error) {
+    if (text.statusCode !== 404)
+      logStep(
+        `Could not read REVIEW.md at ${ref} (HTTP ${text.statusCode}); reviewing without it.`,
+      );
+    return undefined;
+  }
+  const trimmed = text.trim();
+  if (trimmed === "") return undefined;
+  const truncated = trimmed.length > MAX_REVIEW_INSTRUCTIONS_CHARS;
+  logStep(
+    `Using REVIEW.md from ${ref} (${trimmed.length} chars${truncated ? `; only the first ${MAX_REVIEW_INSTRUCTIONS_CHARS} are used` : ""}).`,
+  );
+  return truncateWithMarker(trimmed, MAX_REVIEW_INSTRUCTIONS_CHARS, "REVIEW.md");
+}
+
 async function reviewMergeRequestWithTools(params: {
   llm: OpenAI | Anthropic;
   aiModel: string;
@@ -380,6 +417,7 @@ async function reviewMergeRequestWithTools(params: {
   headers: Record<string, string>;
   forceTools: boolean;
   promptProfile?: PromptProfile;
+  reviewInstructions?: string;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -394,6 +432,7 @@ async function reviewMergeRequestWithTools(params: {
     headers,
     forceTools,
     promptProfile = DEFAULT_PROMPT_PROFILE,
+    reviewInstructions,
     loggers,
     debugDumpFile,
     debugRecordWriter,
@@ -403,12 +442,15 @@ async function reviewMergeRequestWithTools(params: {
     `Single-pass review started for ${changes.length} file(s) (fallback mode).`,
   );
 
-  const messages: ChatCompletionMessageParam[] = buildPrompt({
-    changes: changes.map((change) => ({ path: change.new_path, diff: change.diff })),
-    limits: promptLimits,
-    allowTools: true,
-    profile: promptProfile,
-  });
+  const messages: ChatCompletionMessageParam[] = withReviewInstructions(
+    buildPrompt({
+      changes: changes.map((change) => ({ path: change.new_path, diff: change.diff })),
+      limits: promptLimits,
+      allowTools: true,
+      profile: promptProfile,
+    }),
+    reviewInstructions,
+  );
   messages.push({
     role: "user",
     content: `Merge request metadata:\n${buildReviewMetadata(changes, refs)}`,
@@ -583,6 +625,7 @@ async function runFileReviewWithTools(params: {
   headers: Record<string, string>;
   forceTools: boolean;
   promptProfile: PromptProfile;
+  reviewInstructions?: string;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -599,20 +642,24 @@ async function runFileReviewWithTools(params: {
     headers,
     forceTools,
     promptProfile,
+    reviewInstructions,
     loggers,
     debugDumpFile,
     debugRecordWriter,
   } = params;
   const { logDebug, logStep } = loggers;
 
-  const messages: ChatCompletionMessageParam[] = buildFileReviewPrompt({
-    filePath,
-    fileDiff,
-    summary,
-    otherChangedFiles,
-    allowTools: true,
-    profile: promptProfile,
-  });
+  const messages: ChatCompletionMessageParam[] = withReviewInstructions(
+    buildFileReviewPrompt({
+      filePath,
+      fileDiff,
+      summary,
+      otherChangedFiles,
+      allowTools: true,
+      profile: promptProfile,
+    }),
+    reviewInstructions,
+  );
 
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {
@@ -971,6 +1018,8 @@ export async function reviewMergeRequestMultiPass(params: {
   /** When AI_PROMPT_PROFILE is not set explicitly, a triage JSON parse failure
    *  demotes the whole run to the "weak" profile (behavioral capability probe). */
   allowProfileAutoDemote?: boolean;
+  /** Repository REVIEW.md (see loadReviewInstructions), appended to every pass. */
+  reviewInstructions?: string;
   loggers: LoggerFns;
   debugDumpFile?: string;
   debugRecordWriter?: DebugRecordWriter;
@@ -989,6 +1038,7 @@ export async function reviewMergeRequestMultiPass(params: {
     forceTools,
     promptProfile = DEFAULT_PROMPT_PROFILE,
     allowProfileAutoDemote = false,
+    reviewInstructions,
     loggers,
     debugDumpFile,
     debugRecordWriter,
@@ -1007,10 +1057,9 @@ export async function reviewMergeRequestMultiPass(params: {
     renamed_file: c.renamed_file,
     diff: c.diff,
   }));
-  const triageMessages = buildTriagePrompt(
-    triageInputs,
-    promptProfile,
-    triageDiffChars,
+  const triageMessages = withReviewInstructions(
+    buildTriagePrompt(triageInputs, promptProfile, triageDiffChars),
+    reviewInstructions,
   );
   let triageResult: ReturnType<typeof parseTriageResponse> = null;
   let triageText: string | null = null;
@@ -1067,7 +1116,10 @@ export async function reviewMergeRequestMultiPass(params: {
           model: aiModel,
           temperature: 0.1,
           stream: false,
-          messages: buildTriagePrompt(triageInputs, "weak", triageDiffChars),
+          messages: withReviewInstructions(
+            buildTriagePrompt(triageInputs, "weak", triageDiffChars),
+            reviewInstructions,
+          ),
           response_format: { type: "json_object" },
         },
       });
@@ -1115,6 +1167,7 @@ export async function reviewMergeRequestMultiPass(params: {
       headers,
       forceTools,
       promptProfile: effectiveProfile,
+      reviewInstructions,
       loggers,
       debugDumpFile,
       debugRecordWriter,
@@ -1177,6 +1230,7 @@ export async function reviewMergeRequestMultiPass(params: {
           headers,
           forceTools,
           promptProfile: effectiveProfile,
+          reviewInstructions,
           loggers,
           debugDumpFile,
           debugRecordWriter,
@@ -1250,7 +1304,7 @@ export async function reviewMergeRequestMultiPass(params: {
         model: aiModel,
         temperature: 0.1,
         stream: false,
-        messages: consolidateMessages,
+        messages: withReviewInstructions(consolidateMessages, reviewInstructions),
       },
     });
     const consolidatedText = extractCompletionText(consolidateCompletion);
@@ -1259,14 +1313,17 @@ export async function reviewMergeRequestMultiPass(params: {
     }
 
     logStep("Pass 4/4: verifying consolidated findings (repo tools)");
-    const verificationMessages = buildVerificationPrompt({
-      perFileFindings,
-      summary: triageResult.summary,
-      consolidatedFindings: consolidatedText,
-      maxFindings,
-      refs,
-      profile: effectiveProfile,
-    });
+    const verificationMessages = withReviewInstructions(
+      buildVerificationPrompt({
+        perFileFindings,
+        summary: triageResult.summary,
+        consolidatedFindings: consolidatedText,
+        maxFindings,
+        refs,
+        profile: effectiveProfile,
+      }),
+      reviewInstructions,
+    );
     try {
       const verificationCompletion = await runVerificationWithTools({
         llm,
