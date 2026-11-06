@@ -97,7 +97,7 @@ GitLab provides these automatically in Merge Request pipelines:
 
 ## Flags
 
-- `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated only).
+- `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated only). Lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `go.sum`, …), minified bundles, source maps, test snapshots, and files with no diff text (pure renames, binaries) are always skipped.
 - `--max-diffs=50` - Max number of diffs included in the prompt.
 - `--max-diff-chars=16000` - Max chars per diff chunk (single-pass fallback only).
 - `--max-total-prompt-chars=220000` - Final hard cap for prompt size (single-pass fallback only).
@@ -158,11 +158,12 @@ Notes:
 
 ## Architecture
 
-The reviewer uses a three-pass pipeline optimized for large merge requests:
+The reviewer uses a four-pass pipeline optimized for large merge requests:
 
 1. **Triage** - A fast LLM pass classifies each changed file as `NEEDS_REVIEW` or `SKIP`, with a per-file `reason`, and generates a short MR summary. Each file diff is truncated to `--triage-diff-chars` (default 2000).
 2. **Per-file review** - Only `NEEDS_REVIEW` files are reviewed (if triage marks every file `SKIP`, all files are reviewed anyway). Each reviewed file gets a dedicated LLM call running in parallel (with tools to fetch full files or grep the repository).
 3. **Consolidate** - Per-file findings are merged, deduplicated, ranked by severity, and trimmed to top N (default 5).
+4. **Verify** - A skeptical pass checks the consolidated findings against the repository at the MR head (with the same tools), drops the ones the code contradicts or it can't confirm, and corrects line numbers.
 
 If the triage pass fails (API error, unparseable response), the pipeline falls back to the original single-pass approach automatically.
 

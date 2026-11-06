@@ -15,6 +15,7 @@ import {
   hasForceToolsFlag,
   hasIncludeArtifactsFlag,
   hasIgnoredExtension,
+  isGeneratedFile,
   hasInlineCommentsFlag,
   parseIgnoreExtensions,
   parseNumberFlag,
@@ -195,7 +196,19 @@ async function main(): Promise<void> {
     });
     if (mrChanges instanceof Error) throw mrChanges;
 
-    const filteredChanges = (mrChanges.changes ?? []).filter(
+    const allChanges = mrChanges.changes ?? [];
+    const reviewable = allChanges.filter(
+      (change) => change.diff.trim() !== "" && !isGeneratedFile(change.new_path),
+    );
+    const skipped = allChanges
+      .filter((change) => !reviewable.includes(change))
+      .map((change) => change.new_path);
+    if (skipped.length > 0) {
+      logStep(
+        `Skipping ${skipped.length} file(s) with no diff text (renames, binaries) or generated content (lockfiles, minified, snapshots): ${skipped.slice(0, 10).join(", ")}${skipped.length > 10 ? ", …" : ""}`,
+      );
+    }
+    const filteredChanges = reviewable.filter(
       (change) =>
         ignoredExtensions.length === 0 ||
         (!hasIgnoredExtension(change.new_path, ignoredExtensions) &&
