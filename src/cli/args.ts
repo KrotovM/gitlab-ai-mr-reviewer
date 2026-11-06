@@ -141,6 +141,34 @@ export function parseTriageDiffChars(argv: string[]): number {
   );
 }
 
+/** Generated files that are never worth a model call: their diffs are long
+ *  enough to crowd real code out of the triage prompt. */
+const GENERATED_FILE_NAMES = new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+  "composer.lock",
+  "Gemfile.lock",
+  "Cargo.lock",
+  "poetry.lock",
+  "Pipfile.lock",
+  "uv.lock",
+  "go.sum",
+]);
+const GENERATED_SUFFIXES = [".min.js", ".min.css", ".js.map", ".css.map", ".snap"];
+
+export function isGeneratedFile(filePath: string): boolean {
+  const name = filePath.slice(filePath.lastIndexOf("/") + 1);
+  const lower = name.toLowerCase();
+  return (
+    GENERATED_FILE_NAMES.has(name) ||
+    GENERATED_SUFFIXES.some((suffix) => lower.endsWith(suffix))
+  );
+}
+
 export function hasIgnoredExtension(
   filePath: string,
   ignoredExtensions: readonly string[],

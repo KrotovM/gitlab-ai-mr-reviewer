@@ -16,6 +16,33 @@ type GitLabFetchFunction<
   ...rest: any[]
 ) => Promise<Result>;
 
+/** GitLab answers 429 when rate-limited and 502-504 while it restarts or is
+ *  overloaded; both clear up within seconds, so those and network errors are
+ *  retried, honoring Retry-After. Any other status is final.
+ *  ponytail: a retried POST can duplicate a note if GitLab stored it before
+ *  failing; rare, and a duplicate beats losing the whole review. */
+const RETRY_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_RETRIES = 3;
+
+async function fetchWithRetry(url: URL, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    let res: Response | undefined;
+    try {
+      res = await fetch(url, init);
+      if (!RETRY_STATUSES.has(res.status) || attempt === MAX_RETRIES) return res;
+    } catch (error) {
+      if (attempt === MAX_RETRIES) throw error;
+    }
+    const header = res?.headers.get("retry-after");
+    const seconds = header == null ? NaN : Number(header);
+    const delayMs = Number.isFinite(seconds) && seconds >= 0
+      ? Math.min(seconds, 60) * 1000
+      : 500 * 2 ** attempt * (1 + Math.random() / 4);
+    res?.body?.cancel().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
 interface FetchFileAtRefParams {
   filePath: string;
   ref: string;
@@ -31,7 +58,7 @@ export const fetchFileAtRef: GitLabFetchFunction<
   url.searchParams.set("ref", ref);
   let res: Response | Error;
   try {
-    res = await fetch(url, { headers: { ...headers } });
+    res = await fetchWithRetry(url, { headers: { ...headers } });
   } catch (error: any) {
     res = error;
   }
@@ -89,7 +116,7 @@ export const postMergeRequestNote: GitLabFetchFunction<
   );
   let aiComment: Response | Error;
   try {
-    aiComment = await fetch(commentUrl, {
+    aiComment = await fetchWithRetry(commentUrl, {
       method: "POST",
       headers: {
         ...headers,
@@ -154,7 +181,7 @@ export const searchRepository: GitLabFetchFunction<
   url.searchParams.set("per_page", "50");
   let res: Response | Error;
   try {
-    res = await fetch(url, { headers: { ...headers } });
+    res = await fetchWithRetry(url, { headers: { ...headers } });
   } catch (error: any) {
     res = error;
   }
@@ -222,7 +249,7 @@ export const fetchMergeRequestChanges: GitLabFetchFunction<
   let res: Response | Error;
 
   try {
-    res = await fetch(url, { headers: { ...headers } });
+    res = await fetchWithRetry(url, { headers: { ...headers } });
   } catch (error: any) {
     res = error;
   }
@@ -267,7 +294,7 @@ async function gitlabRequest(
 ): Promise<Response | GitLabError> {
   let res: Response | Error;
   try {
-    res = await fetch(url, init);
+    res = await fetchWithRetry(url, init);
   } catch (error: any) {
     res = error;
   }
