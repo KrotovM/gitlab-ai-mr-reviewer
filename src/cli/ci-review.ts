@@ -46,9 +46,12 @@ import {
  *  proxy timeout so the SDK's 5xx retries stay the first line of defense. */
 const COMPLETION_TIMEOUT_MS = 180_000;
 
-/** Whether to request token usage in streamed completions. Flipped off for the
- *  rest of the run the first time a gateway rejects stream_options with a 400. */
-let streamUsageSupported = true;
+/** Optional OpenAI request params that some endpoints reject with a 400: strict
+ *  gateways refuse stream_options, and reasoning models (o-series, gpt-5 with
+ *  reasoning on) accept only the default temperature. Each one is dropped for
+ *  the rest of the run the first time a 400 names it. */
+const OPTIONAL_PARAMS = ["stream_options", "temperature"] as const;
+const droppedParams = new Set<string>();
 
 /** Tool-result caps. Every tool response is re-sent as prompt on each following
  *  round, so oversized results multiply prefill time on self-hosted models. */
@@ -151,35 +154,36 @@ async function createCompletionWithDebug(params: {
   // The SDK's own timeout only covers time-to-headers; a stalled SSE body would hang
   // forever without the explicit AbortSignal deadline.
   const { stream: _stream, ...createParams } = request;
-  const attempt = (withUsage: boolean) =>
-    llm instanceof Anthropic
-      ? createAnthropicCompletion(
-          llm,
-          createParams,
-          AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
-        )
-      : llm.chat.completions
-          .stream(
-            withUsage
-              ? { ...createParams, stream_options: { include_usage: true } }
-              : createParams,
-            { signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS) },
-          )
-          .finalChatCompletion();
+  const attempt = () => {
+    if (llm instanceof Anthropic) {
+      return createAnthropicCompletion(
+        llm,
+        createParams,
+        AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
+      );
+    }
+    const body = { ...createParams, stream_options: { include_usage: true } };
+    for (const param of droppedParams) delete body[param];
+    return llm.chat.completions
+      .stream(body, { signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS) })
+      .finalChatCompletion();
+  };
   try {
     let completion: any;
-    try {
-      completion = await attempt(streamUsageSupported);
-    } catch (error: any) {
-      // Strict OpenAI-compatible gateways 400 on unknown params. Drop the
-      // usage request for the rest of the run and retry this call once.
-      const rejectedStreamOptions =
-        streamUsageSupported &&
-        error?.status === 400 &&
-        String(error?.message ?? "").includes("stream_options");
-      if (!rejectedStreamOptions) throw error;
-      streamUsageSupported = false;
-      completion = await attempt(false);
+    // Each retry drops one more param, so this ends after OPTIONAL_PARAMS.length retries.
+    for (;;) {
+      try {
+        completion = await attempt();
+        break;
+      } catch (error: any) {
+        const message = String(error?.message ?? "");
+        const rejected =
+          !(llm instanceof Anthropic) &&
+          error?.status === 400 &&
+          OPTIONAL_PARAMS.find((p) => !droppedParams.has(p) && message.includes(p));
+        if (!rejected) throw error;
+        droppedParams.add(rejected);
+      }
     }
     await appendDebugDump(debugDumpFile, debugRecordWriter, {
       kind: "openai_response",
@@ -240,14 +244,80 @@ function buildReviewMetadata(
   );
 }
 
-async function handleGetFileTool(
+function buildTools(refs: {
+  base: string;
+  head: string;
+}): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  return [
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GET_FILE,
+        description: `Read a repository file at a git ref. Each returned line starts with its line number and a tab; the result also gives start_line, end_line and total_lines. One call returns at most about ${MAX_TOOL_FILE_CHARS.toLocaleString("en-US")} characters: when truncated is true, call again with start_line set to next_start_line, or pass start_line/end_line to read just the region you need in a large file. Use the head ref for the code as the merge request leaves it and the base ref for the code before it. A file that doesn't exist at the ref (e.g. a new file at base) returns ok: false with the HTTP status.`,
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string", description: "Repository file path." },
+            ref: {
+              type: "string",
+              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
+            },
+            start_line: {
+              type: "integer",
+              minimum: 1,
+              description: "First line to return (1-based). Default: 1.",
+            },
+            end_line: {
+              type: "integer",
+              minimum: 1,
+              description: "Last line to return, inclusive. Default: end of file.",
+            },
+          },
+          required: ["path", "ref"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: TOOL_NAME_GREP,
+        description:
+          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: {
+              type: "string",
+              description:
+                "Literal text to find, e.g. a function or variable name (no regex).",
+            },
+            ref: {
+              type: "string",
+              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
+}
+
+export async function handleGetFileTool(
   argsRaw: string,
   gitLabProjectApiUrl: URL,
   headers: Record<string, string>,
   logStep: (message: string) => void,
 ): Promise<string> {
   try {
-    const parsed = JSON.parse(argsRaw) as { path?: string; ref?: string };
+    const parsed = JSON.parse(argsRaw) as {
+      path?: string;
+      ref?: string;
+      start_line?: number;
+      end_line?: number;
+    };
     const path = parsed.path?.trim();
     const ref = parsed.ref?.trim();
     if (!path || !ref) {
@@ -272,17 +342,45 @@ async function handleGetFileTool(
         error: fileText.message,
       });
     }
-    // Numbered like `cat -n`, so findings cite exact lines instead of counted ones.
-    const numbered = fileText
-      .split("\n")
-      .map((line, i) => `${i + 1}\t${line}`)
-      .join("\n");
+    const lines = fileText.split("\n");
+    if (fileText.endsWith("\n")) lines.pop();
+    const start = Math.max(1, Math.floor(Number(parsed.start_line) || 1));
+    const end = Math.min(
+      lines.length,
+      Math.floor(Number(parsed.end_line) || lines.length),
+    );
+    if (start > lines.length) {
+      return JSON.stringify({
+        ok: false,
+        path,
+        ref,
+        error: `start_line ${start} is past the end of the file (${lines.length} lines).`,
+      });
+    }
+    // Numbered like `cat -n`, so findings cite exact lines instead of counted
+    // ones. Cut at a line boundary so next_start_line resumes exactly; a single
+    // line longer than the cap (minified code) is sliced.
+    const rows: string[] = [];
+    let size = 0;
+    let last = start - 1;
+    for (let n = start; n <= end; n += 1) {
+      const row = `${n}\t${lines[n - 1]}`.slice(0, MAX_TOOL_FILE_CHARS);
+      if (rows.length > 0 && size + row.length > MAX_TOOL_FILE_CHARS) break;
+      rows.push(row);
+      size += row.length + 1; // + the newline joining it to the next row
+      last = n;
+    }
+    const truncated = last < end;
     return JSON.stringify({
       ok: true,
       path,
       ref,
-      content: numbered.slice(0, MAX_TOOL_FILE_CHARS),
-      truncated: numbered.length > MAX_TOOL_FILE_CHARS,
+      start_line: start,
+      end_line: last,
+      total_lines: lines.length,
+      content: rows.join("\n"),
+      truncated,
+      ...(truncated ? { next_start_line: last + 1 } : {}),
     });
   } catch (error: any) {
     logToolFailure(logStep, TOOL_NAME_GET_FILE, error);
@@ -456,52 +554,7 @@ async function reviewMergeRequestWithTools(params: {
     content: `Merge request metadata:\n${buildReviewMetadata(changes, refs)}`,
   });
 
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
-    {
-      type: "function",
-      function: {
-        name: TOOL_NAME_GET_FILE,
-        description:
-          "Fetch file content at a specific git ref for review context. Each line starts with its line number and a tab.",
-        parameters: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string", description: "Repository file path." },
-            ref: {
-              type: "string",
-              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
-            },
-          },
-          required: ["path", "ref"],
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: TOOL_NAME_GREP,
-        description:
-          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
-        parameters: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            query: {
-              type: "string",
-              description:
-                "Literal text to find, e.g. a function or variable name (no regex).",
-            },
-            ref: {
-              type: "string",
-              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
-            },
-          },
-          required: ["query"],
-        },
-      },
-    },
-  ];
+  const tools = buildTools(refs);
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     logStep(
@@ -661,52 +714,7 @@ async function runFileReviewWithTools(params: {
     reviewInstructions,
   );
 
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
-    {
-      type: "function",
-      function: {
-        name: TOOL_NAME_GET_FILE,
-        description:
-          "Fetch file content at a specific git ref for review context. Each line starts with its line number and a tab.",
-        parameters: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string", description: "Repository file path." },
-            ref: {
-              type: "string",
-              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
-            },
-          },
-          required: ["path", "ref"],
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: TOOL_NAME_GREP,
-        description:
-          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
-        parameters: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            query: {
-              type: "string",
-              description:
-                "Literal text to find, e.g. a function or variable name (no regex).",
-            },
-            ref: {
-              type: "string",
-              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
-            },
-          },
-          required: ["query"],
-        },
-      },
-    },
-  ];
+  const tools = buildTools(refs);
 
   for (let round = 0; round < MAX_FILE_TOOL_ROUNDS; round += 1) {
     const completion = await createCompletionWithDebug({
@@ -850,52 +858,7 @@ async function runVerificationWithTools(params: {
 
   const messages: ChatCompletionMessageParam[] = [...baseMessages];
 
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
-    {
-      type: "function",
-      function: {
-        name: TOOL_NAME_GET_FILE,
-        description:
-          "Fetch file content at a specific git ref for review context. Each line starts with its line number and a tab.",
-        parameters: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string", description: "Repository file path." },
-            ref: {
-              type: "string",
-              description: `Git ref or sha. Prefer "${refs.base}" (base) or "${refs.head}" (head).`,
-            },
-          },
-          required: ["path", "ref"],
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: TOOL_NAME_GREP,
-        description:
-          "Search the repository for literal text (case-insensitive substring match). Regular expressions are not supported: `a|b` or `foo.*bar` are searched as literal text, so query one identifier at a time. Returns up to 10 matching code fragments with file paths and line numbers.",
-        parameters: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            query: {
-              type: "string",
-              description:
-                "Literal text to find, e.g. a function or variable name (no regex).",
-            },
-            ref: {
-              type: "string",
-              description: `Git ref to search in. Prefer "${refs.head}" (head).`,
-            },
-          },
-          required: ["query"],
-        },
-      },
-    },
-  ];
+  const tools = buildTools(refs);
 
   const verificationForceRound0 =
     forceTools && draftHasStructuredFindings(consolidatedDraft);

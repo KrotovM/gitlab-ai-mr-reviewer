@@ -418,3 +418,103 @@ export const replyToMergeRequestDiscussion: GitLabFetchFunction<
   );
   return res instanceof Error ? res : undefined;
 };
+
+/** Hidden marker that lets later runs find this tool's summary note. */
+export const SUMMARY_MARKER = "<!-- gitlab-ai-review:summary -->";
+
+interface MergeRequestNote {
+  id: number;
+  body: string;
+  author?: { id?: number };
+}
+
+/** Id of the token user's earlier summary note on this MR, or null. Notes are
+ *  listed most recently updated first, and every run updates the summary, so it
+ *  is normally on the first page. */
+async function findSummaryNote({
+  gitLabProjectApiUrl,
+  headers,
+  mergeRequestIid,
+}: {
+  gitLabProjectApiUrl: URL;
+  headers: GitLabFetchHeaders;
+  mergeRequestIid: string | number;
+}): Promise<number | null | GitLabError> {
+  // gitLabProjectApiUrl is <api>/projects/<id>, so ../user is <api>/user.
+  const me = await gitlabRequest(
+    new URL("../user", gitLabProjectApiUrl),
+    { headers: { ...headers } },
+    "Failed to read the token's user",
+  );
+  if (me instanceof Error) return me;
+  const myId = ((await me.json()) as { id?: number }).id;
+  if (myId == null) return null;
+  // ponytail: reads at most 20 pages (2000 notes); past that a new note is posted.
+  for (let page = 1; page <= 20; page += 1) {
+    const url = new URL(
+      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes`,
+    );
+    url.searchParams.set("order_by", "updated_at");
+    url.searchParams.set("sort", "desc");
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("page", String(page));
+    const res = await gitlabRequest(
+      url,
+      { headers: { ...headers } },
+      "Failed to list merge request notes",
+    );
+    if (res instanceof Error) return res;
+    const batch = (await res.json()) as MergeRequestNote[];
+    // Author check: a person quoting the marker must not get their note overwritten.
+    const found = batch.find(
+      (n) => n.author?.id === myId && n.body.includes(SUMMARY_MARKER),
+    );
+    if (found != null) return found.id;
+    const next = res.headers.get("x-next-page");
+    if (next === "" || (next == null && batch.length < 100)) break;
+  }
+  return null;
+}
+
+/** Posts the review as the MR's summary note. Later runs edit their own earlier
+ *  note (found by marker and author) instead of stacking a new comment on every
+ *  push; when it can't be found or edited, a new note is posted. */
+export async function upsertSummaryNote(params: {
+  gitLabProjectApiUrl: URL;
+  headers: GitLabFetchHeaders;
+  mergeRequestIid: string | number;
+  note: string;
+  logStep: (message: string) => void;
+}): Promise<"updated" | "created" | GitLabError> {
+  const { gitLabProjectApiUrl, headers, mergeRequestIid, logStep } = params;
+  const note = `${params.note}\n\n${SUMMARY_MARKER}`;
+  const existing = await findSummaryNote(params);
+  if (existing instanceof Error) {
+    logStep(
+      `Could not find the earlier AI review note (${existing.message}, HTTP ${existing.statusCode}); posting a new one.`,
+    );
+  } else if (existing != null) {
+    const res = await gitlabRequest(
+      new URL(
+        `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes/${existing}`,
+      ),
+      {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ body: neutralizeQuickActions(note) }),
+      },
+      "Failed to update AI comment",
+    );
+    if (!(res instanceof Error)) return "updated";
+    logStep(
+      `Could not update the earlier AI review note (HTTP ${res.statusCode}); posting a new one.`,
+    );
+  }
+  const res = await postMergeRequestNote({
+    gitLabProjectApiUrl,
+    headers,
+    mergeRequestIid,
+    note,
+  });
+  return res instanceof Error ? res : "created";
+}

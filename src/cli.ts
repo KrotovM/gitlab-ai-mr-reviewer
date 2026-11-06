@@ -31,7 +31,7 @@ import {
 import { postInlineFindings } from "./cli/inline-comments.js";
 import {
   fetchMergeRequestChanges,
-  postMergeRequestNote,
+  upsertSummaryNote,
 } from "./gitlab/services.js";
 import { renderDebugArtifactsHtml } from "./cli/debug-artifacts-html.js";
 
@@ -257,17 +257,20 @@ async function main(): Promise<void> {
       : answer;
 
     logStep("Posting AI review note to merge request");
-    const noteRes = await postMergeRequestNote(
-      {
-        gitLabProjectApiUrl: gitLabProjectApiUrl,
-        headers,
-        mergeRequestIid,
-        note,
-      },
-    );
+    const noteRes = await upsertSummaryNote({
+      gitLabProjectApiUrl,
+      headers,
+      mergeRequestIid,
+      note,
+      logStep,
+    });
     if (noteRes instanceof Error) throw noteRes;
 
-    process.stdout.write("Posted AI review comment to merge request.\n");
+    process.stdout.write(
+      noteRes === "updated"
+        ? "Updated the AI review comment on the merge request.\n"
+        : "Posted AI review comment to merge request.\n",
+    );
   } finally {
     if (INCLUDE_ARTIFACTS && artifactHtmlFile != null && !artifactWritten) {
       try {
