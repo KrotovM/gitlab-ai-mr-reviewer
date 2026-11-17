@@ -367,7 +367,9 @@ export function buildVerificationPrompt(params: {
     refs,
     profile = DEFAULT_PROMPT_PROFILE,
   } = params;
+  // Files that came back with no findings are no evidence; skip them, as consolidation does.
   const findingsText = perFileFindings
+    .filter((f) => !isEmptyReviewBody(f.findings))
     .map((f) => `### ${f.path}\n${f.findings}`)
     .join("\n\n");
 
