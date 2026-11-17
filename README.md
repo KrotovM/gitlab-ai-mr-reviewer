@@ -22,7 +22,7 @@ Gitlab AI Code Review is a CLI tool that leverages OpenAI or Anthropic (Claude) 
 
 ### GitLab CI/CD
 
-Run the tool in Merge Request pipelines to post a new AI review comment to the MR.
+Run the tool in Merge Request pipelines to post an AI review comment to the MR. Later pipelines update that same comment instead of adding a new one on every push (GitLab marks it as edited); if it can't be found or edited, a new comment is posted.
 
 Minimal MR review job:
 
