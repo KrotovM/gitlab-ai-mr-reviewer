@@ -1,144 +1,127 @@
 /** @format */
 
+import { parseArgs } from "node:util";
 import {
+  DEFAULT_MAX_FINDINGS,
   DEFAULT_PROMPT_LIMITS,
+  DEFAULT_REVIEW_CONCURRENCY,
   DEFAULT_TRIAGE_DIFF_CHARS,
-  parsePromptProfile as parsePromptProfileValue,
-  type PromptLimits,
-  type PromptProfile,
 } from "../prompt/index.js";
 
 export function requireEnvs(names: string[]): Record<string, string> {
-  const missing = names.filter((name) => {
-    const value = process.env[name];
-    return value == null || value.trim() === "";
-  });
-
+  const missing = names.filter((name) => envOrUndefined(name) == null);
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(", ")}`);
   }
-
-  const result: Record<string, string> = {};
-  for (const name of names) {
-    result[name] = process.env[name]!.trim();
-  }
-  return result;
-}
-
-export function envOrDefault(name: string, defaultValue: string): string {
-  const value = process.env[name];
-  if (value == null) return defaultValue;
-  const trimmed = value.trim();
-  return trimmed === "" ? defaultValue : trimmed;
+  return Object.fromEntries(names.map((name) => [name, envOrUndefined(name)!]));
 }
 
 export function envOrUndefined(name: string): string | undefined {
-  const value = process.env[name];
-  if (value == null) return undefined;
-  const trimmed = value.trim();
-  return trimmed === "" ? undefined : trimmed;
+  return process.env[name]?.trim() || undefined;
 }
 
-export function hasDebugFlag(argv: string[]): boolean {
-  const args = new Set(argv.slice(2));
-  return args.has("--debug");
+export function envOrDefault(name: string, defaultValue: string): string {
+  return envOrUndefined(name) ?? defaultValue;
 }
 
-export function hasForceToolsFlag(argv: string[]): boolean {
-  const args = new Set(argv.slice(2));
-  return args.has("--force-tools");
-}
+const CLI_OPTIONS = {
+  help: { type: "boolean", short: "h" },
+  debug: { type: "boolean" },
+  "force-tools": { type: "boolean" },
+  "include-artifacts": { type: "boolean" },
+  "inline-comments": { type: "boolean" },
+  "ignore-ext": { type: "string", multiple: true },
+  "max-diffs": { type: "string" },
+  "max-diff-chars": { type: "string" },
+  "max-total-prompt-chars": { type: "string" },
+  "triage-diff-chars": { type: "string" },
+  "max-findings": { type: "string" },
+  "max-review-concurrency": { type: "string" },
+} as const;
 
-export function hasIncludeArtifactsFlag(argv: string[]): boolean {
-  const args = new Set(argv.slice(2));
-  return args.has("--include-artifacts");
-}
+/** Parses the command line. Unknown flags, positionals, a value on an on/off
+ *  flag or a missing one on a valued flag don't fail the job (an upgrade must
+ *  not break pipelines that pass an old flag): they are skipped and listed in
+ *  `ignoredArgs` for a warning. Bad numbers still throw. */
+export function parseCliArgs(args: string[]) {
+  const { values, tokens } = parseArgs({
+    args,
+    options: CLI_OPTIONS,
+    strict: false,
+    allowPositionals: true,
+    tokens: true,
+  });
 
-export function hasInlineCommentsFlag(argv: string[]): boolean {
-  const args = new Set(argv.slice(2));
-  return args.has("--inline-comments");
-}
-
-export function parseIgnoreExtensions(argv: string[]): string[] {
-  const parsed: string[] = [];
-  const args = argv.slice(2);
-
-  for (const current of args) {
-    if (current === "--ignore-ext") {
-      throw new Error("Use comma-separated format: --ignore-ext=md,lock");
-    }
-    if (!current.startsWith("--ignore-ext=")) continue;
-    const value = current.slice("--ignore-ext=".length);
-    if (value.trim() === "") continue;
-
-    const pieces = value
-      .split(",")
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean);
-
-    for (const piece of pieces) {
-      parsed.push(piece.startsWith(".") ? piece : `.${piece}`);
+  const ignoredArgs: string[] = [];
+  for (const token of tokens) {
+    if (token.kind === "positional") {
+      ignoredArgs.push(token.value);
+    } else if (token.kind === "option") {
+      const option = (CLI_OPTIONS as Record<string, { type: string }>)[token.name];
+      const raw = token.inlineValue ? `${token.rawName}=${token.value}` : token.rawName;
+      if (option == null) ignoredArgs.push(raw);
+      else if (option.type === "boolean" && token.value !== undefined) ignoredArgs.push(raw);
+      else if (option.type === "string" && token.value === undefined)
+        ignoredArgs.push(`${token.rawName} (no value)`);
     }
   }
 
-  return Array.from(new Set(parsed));
-}
-
-export function parseNumberFlag(
-  argv: string[],
-  flagName: string,
-  defaultValue: number,
-  minValue: number,
-): number {
-  const prefix = `--${flagName}=`;
-  let value = defaultValue;
-  for (const arg of argv.slice(2)) {
-    if (!arg.startsWith(prefix)) continue;
-    const raw = arg.slice(prefix.length).trim();
-    if (raw === "") {
-      throw new Error(`Missing value for --${flagName}. Expected integer.`);
-    }
-    const parsed = Number(raw);
-    if (!Number.isInteger(parsed) || parsed < minValue) {
+  const int = (name: string, defaultValue: number, minValue: number): number => {
+    const raw = (values as Record<string, unknown>)[name];
+    // Absent, or given without a value (already listed in ignoredArgs).
+    if (typeof raw !== "string") return defaultValue;
+    const text = String(raw).trim();
+    const parsed = Number(text);
+    if (text === "" || !Number.isInteger(parsed) || parsed < minValue) {
       throw new Error(
-        `Invalid value for --${flagName}: "${raw}". Expected integer >= ${minValue}.`,
+        `Invalid value for --${name}: "${text}". Expected integer >= ${minValue}.`,
       );
     }
-    value = parsed;
-  }
-  return value;
-}
+    return parsed;
+  };
 
-export function parsePromptLimits(argv: string[]): PromptLimits {
+  const ignoredExtensions = [
+    ...new Set(
+      [values["ignore-ext"] ?? []]
+        .flat()
+        .filter((value) => typeof value === "string")
+        .flatMap((value) => value.split(","))
+        .map((part) => part.trim().toLowerCase())
+        .filter(Boolean)
+        .map((ext) => (ext.startsWith(".") ? ext : `.${ext}`)),
+    ),
+  ];
+
+  // AI_REVIEW_CONCURRENCY is the CI-variable form of the flag; the flag wins.
+  const envConcurrency = Number(envOrUndefined("AI_REVIEW_CONCURRENCY"));
+
   return {
-    maxDiffs: parseNumberFlag(
-      argv,
-      "max-diffs",
-      DEFAULT_PROMPT_LIMITS.maxDiffs,
-      0,
-    ),
-    maxDiffChars: parseNumberFlag(
-      argv,
-      "max-diff-chars",
-      DEFAULT_PROMPT_LIMITS.maxDiffChars,
-      1,
-    ),
-    maxTotalPromptChars: parseNumberFlag(
-      argv,
-      "max-total-prompt-chars",
-      DEFAULT_PROMPT_LIMITS.maxTotalPromptChars,
+    help: values.help === true,
+    debug: values.debug === true,
+    forceTools: values["force-tools"] === true,
+    includeArtifacts: values["include-artifacts"] === true,
+    inlineComments: values["inline-comments"] === true,
+    ignoredArgs,
+    ignoredExtensions,
+    promptLimits: {
+      maxDiffs: int("max-diffs", DEFAULT_PROMPT_LIMITS.maxDiffs, 0),
+      maxDiffChars: int("max-diff-chars", DEFAULT_PROMPT_LIMITS.maxDiffChars, 1),
+      maxTotalPromptChars: int(
+        "max-total-prompt-chars",
+        DEFAULT_PROMPT_LIMITS.maxTotalPromptChars,
+        1,
+      ),
+    },
+    triageDiffChars: int("triage-diff-chars", DEFAULT_TRIAGE_DIFF_CHARS, 1),
+    maxFindings: int("max-findings", DEFAULT_MAX_FINDINGS, 1),
+    reviewConcurrency: int(
+      "max-review-concurrency",
+      Number.isFinite(envConcurrency) && envConcurrency >= 1
+        ? Math.floor(envConcurrency)
+        : DEFAULT_REVIEW_CONCURRENCY,
       1,
     ),
   };
-}
-
-export function parseTriageDiffChars(argv: string[]): number {
-  return parseNumberFlag(
-    argv,
-    "triage-diff-chars",
-    DEFAULT_TRIAGE_DIFF_CHARS,
-    1,
-  );
 }
 
 /** Generated files that are never worth a model call: their diffs are long
@@ -167,18 +150,4 @@ export function isGeneratedFile(filePath: string): boolean {
     GENERATED_FILE_NAMES.has(name) ||
     GENERATED_SUFFIXES.some((suffix) => lower.endsWith(suffix))
   );
-}
-
-export function hasIgnoredExtension(
-  filePath: string,
-  ignoredExtensions: readonly string[],
-): boolean {
-  const lowerPath = filePath.toLowerCase();
-  return ignoredExtensions.some((ext) => lowerPath.endsWith(ext));
-}
-
-/** Reads AI_PROMPT_PROFILE (values: "default" | "weak"). Anything else falls
- *  back to the default profile. */
-export function readPromptProfileFromEnv(): PromptProfile {
-  return parsePromptProfileValue(process.env["AI_PROMPT_PROFILE"]);
 }

@@ -1,6 +1,10 @@
 /** @format */
 
-import { DISCLAIMER } from "../prompt/index.js";
+import {
+  DISCLAIMER,
+  insertBeforeDisclaimer,
+  NOT_REVIEWED_NOTE,
+} from "../prompt/index.js";
 import { isEmptyReviewBody } from "../prompt/profile.js";
 import {
   parseReviewFindings,
@@ -78,7 +82,7 @@ function positionFor(
   };
 }
 
-export type InlinePlan = {
+type InlinePlan = {
   /** Findings on changed lines with no AI thread at that place yet. */
   post: Array<{ finding: ReviewFinding; position: DiffPosition }>;
   /** Findings that already have an AI thread there, open or resolved (dismissed). */
@@ -150,11 +154,7 @@ function summarize(
     counts.resolved > 0 ? `${counts.resolved} outdated resolved` : "",
   ].filter(Boolean);
   if (parts.length === 0) return body;
-  const note = `\n\n💬 Diff threads: ${parts.join(", ")}.`;
-  const disclaimerAt = body.lastIndexOf("\n\n---\n_");
-  return disclaimerAt === -1
-    ? body + note
-    : body.slice(0, disclaimerAt) + note + body.slice(disclaimerAt);
+  return insertBeforeDisclaimer(body, `💬 Diff threads: ${parts.join(", ")}.`);
 }
 
 /** Posts findings that land on changed lines as resolvable diff threads,
@@ -219,9 +219,11 @@ export async function postInlineFindings(params: {
     }
 
     // Resolve only after a real review whose findings could all become threads:
-    // a failed run, or an issue re-reported only in the summary, must not close
-    // threads. Header and triage-summary lines can't pass for "no findings".
+    // a failed run (or failed file), or an issue re-reported only in the summary,
+    // must not close threads. Header and triage-summary lines can't pass for
+    // "no findings".
     const reviewed =
+      !answer.includes(NOT_REVIEWED_NOTE) &&
       movable.length === findings.length &&
       (findings.length > 0 || isEmptyReviewBody(answer.replace(/^[#>].*$/gm, "")));
     let resolved = 0;

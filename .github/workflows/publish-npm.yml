@@ -16,6 +16,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # A tag pushed before the version bump merged would try to republish the old version.
+      - name: Check tag matches package.json version
+        run: |
+          expected="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version ($expected)." >&2
+            exit 1
+          fi
+
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
@@ -30,6 +39,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
 
       - name: Publish
         run: npm publish --access public --provenance

@@ -279,3 +279,15 @@ test("postInlineFindings: never resolves threads after a failed review", async (
     assert.deepEqual(writes, [], triageSummary);
   }
 });
+
+test("postInlineFindings: a run with an unreviewed file posts threads but resolves none", async () => {
+  const posted = finding("src/a.ts", "~2");
+  const writes = fakeGitLab({ pages: [[thread("stale", 3, { at: older })]] });
+  const answer = comment([posted]).replace(
+    "\n\n---\n_",
+    "\n\n⚠️ Not reviewed (model call failed): `src/b.ts`.\n\n---\n_",
+  );
+  const summary = await run(answer);
+  assert.deepEqual(writes.map((w) => w.method), ["POST"]);
+  assert.match(summary, /Not reviewed \(model call failed\): `src\/b\.ts`\.\n\n💬 Diff threads: 1 new\./);
+});

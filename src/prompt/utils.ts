@@ -1,5 +1,7 @@
 /** @format */
 
+import { NO_FINDINGS_SENTENCE } from "./profile.js";
+
 /** Extract the first balanced JSON object substring from arbitrary text.
  *  Useful when an LLM wraps JSON in prose ("Here is the result: { ... }").
  *  Returns null if no balanced object is found. */
@@ -80,9 +82,6 @@ export function sanitizeGitLabMarkdown(input: string): string {
     fenceCount % 2 === 1 ? `${normalized}\n\`\`\`` : normalized;
   return withClosedFence;
 }
-
-const NO_ISSUES_SENTENCE =
-  "No confirmed bugs or high-value optimizations found.";
 
 export type ReviewFinding = {
   severity: "high" | "medium";
@@ -216,7 +215,7 @@ export function renderReviewFinding(f: ReviewFinding): string {
 
 export function normalizeReviewFindingsMarkdown(input: string): string {
   const normalized = input.replace(/\r\n/g, "\n").trim();
-  if (normalized === "" || normalized === NO_ISSUES_SENTENCE) return normalized;
+  if (normalized === "" || normalized === NO_FINDINGS_SENTENCE) return normalized;
 
   const findings = parseReviewFindings(normalized);
   if (findings.length === 0) return normalized;

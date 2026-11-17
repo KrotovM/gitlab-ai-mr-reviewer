@@ -1,20 +1,29 @@
 /** @format */
 
-import {
-  GitLabError,
-  type GitLabFetchHeaders,
-} from "./types.js";
+type GitLabErrorName =
+  | "MISSING_DIFF"
+  | "FILE_FETCH_FAILED"
+  | "FAILED_TO_POST_COMMENT"
+  | "SEARCH_FAILED"
+  | "INLINE_COMMENTS_FAILED";
 
-type GitLabFetchFunction<
-  URLParams extends Record<string, any> = {},
-  Result = GitLabError,
-> = (
-  fetchParams: {
-    gitLabProjectApiUrl: URL;
-    headers: GitLabFetchHeaders;
-  } & URLParams,
-  ...rest: any[]
-) => Promise<Result>;
+export class GitLabError extends Error {
+  constructor(
+    override name: GitLabErrorName,
+    message: string,
+    public statusCode: number,
+    cause: unknown,
+  ) {
+    super(message, { cause });
+  }
+}
+
+type GitLabApi = {
+  gitLabProjectApiUrl: URL;
+  headers: Record<string, string>;
+};
+
+type MergeRequestApi = GitLabApi & { mergeRequestIid: string | number };
 
 /** GitLab answers 429 when rate-limited and 502-504 while it restarts or is
  *  overloaded; both clear up within seconds, so those and network errors are
@@ -43,54 +52,41 @@ async function fetchWithRetry(url: URL, init: RequestInit): Promise<Response> {
   }
 }
 
-interface FetchFileAtRefParams {
-  filePath: string;
-  ref: string;
-}
-type FetchFileAtRefResult = string | GitLabError;
-export const fetchFileAtRef: GitLabFetchFunction<
-  FetchFileAtRefParams,
-  FetchFileAtRefResult
-> = async ({ gitLabProjectApiUrl, headers, filePath, ref }) => {
-  const url = new URL(
-    `${gitLabProjectApiUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
-  );
-  url.searchParams.set("ref", ref);
+/** fetch (with retries) that turns network errors and non-2xx answers into a
+ *  GitLabError whose cause carries the URL, status and the start of the body. */
+async function gitlabRequest(
+  url: URL,
+  init: RequestInit,
+  name: GitLabErrorName,
+  message: string,
+): Promise<Response | GitLabError> {
   let res: Response | Error;
   try {
-    res = await fetchWithRetry(url, { headers: { ...headers } });
+    res = await fetchWithRetry(url, init);
   } catch (error: any) {
     res = error;
   }
-  if (res instanceof Error || !res.ok) {
-    const responseDetails = await (async () => {
-      if (res instanceof Error) {
-        return {
+  if (!(res instanceof Error) && res.ok) return res;
+  const cause =
+    res instanceof Error
+      ? { url: url.toString(), error: { name: res.name, message: res.message } }
+      : {
           url: url.toString(),
-          error: {
-            name: res.name,
-            message: res.message,
-            stack: res.stack,
-          },
+          status: res.status,
+          statusText: res.statusText,
+          body: (await res.text().catch(() => "")).slice(0, 1000),
         };
-      }
-      const bodyText = await res.text().catch(() => "");
-      return {
-        url: url.toString(),
-        status: res.status,
-        statusText: res.statusText,
-        body: bodyText.slice(0, 1000),
-      };
-    })();
-    return new GitLabError({
-      name: "MISSING_OLD_FILES",
-      message: `Failed to fetch file "${filePath}" at ref "${ref}"`,
-      statusCode: res instanceof Error ? 502 : res.status,
-      cause: responseDetails,
-    });
-  }
-  return await res.text();
-};
+  return new GitLabError(name, message, res instanceof Error ? 502 : res.status, cause);
+}
+
+const postJson = (headers: Record<string, string>, body: unknown): RequestInit => ({
+  method: "POST",
+  headers: { ...headers, "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+const mergeRequestUrl = (api: MergeRequestApi, path = ""): URL =>
+  new URL(`${api.gitLabProjectApiUrl}/merge_requests/${api.mergeRequestIid}${path}`);
 
 /** GitLab runs quick actions (`/merge`, `/approve`, …) that start a line of a
  *  note, with the token's permissions. Model text must never trigger them, so
@@ -100,116 +96,60 @@ function neutralizeQuickActions(body: string): string {
   return body.replace(/^\/(?=[a-z])/gim, " /");
 }
 
-interface PostMergeRequestNoteParams {
-  mergeRequestIid: string | number;
-  note: string;
-}
-type PostMergeRequestNoteResult = void | GitLabError;
-export const postMergeRequestNote: GitLabFetchFunction<
-  PostMergeRequestNoteParams,
-  PostMergeRequestNoteResult
-> = async (
-  { gitLabProjectApiUrl, headers, mergeRequestIid, note }
-): Promise<void | GitLabError> => {
-  const commentUrl = new URL(
-    `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes`,
+export async function fetchFileAtRef(
+  params: GitLabApi & { filePath: string; ref: string },
+): Promise<string | GitLabError> {
+  const { gitLabProjectApiUrl, headers, filePath, ref } = params;
+  const url = new URL(
+    `${gitLabProjectApiUrl}/repository/files/${encodeURIComponent(filePath)}/raw`,
   );
-  let aiComment: Response | Error;
-  try {
-    aiComment = await fetchWithRetry(commentUrl, {
-      method: "POST",
-      headers: {
-        ...headers,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ body: neutralizeQuickActions(note) }),
-    });
-  } catch (error: any) {
-    aiComment = error;
-  }
-  if (aiComment instanceof Error || !aiComment.ok) {
-    const responseDetails = await (async () => {
-      if (aiComment instanceof Error) {
-        return {
-          url: commentUrl.toString(),
-          error: {
-            name: aiComment.name,
-            message: aiComment.message,
-            stack: aiComment.stack,
-          },
-        };
-      }
-
-      const bodyText = await aiComment.text().catch(() => "");
-      return {
-        url: commentUrl.toString(),
-        status: aiComment.status,
-        statusText: aiComment.statusText,
-        body: bodyText.slice(0, 4000),
-      };
-    })();
-
-    return new GitLabError({
-      name: "FAILED_TO_POST_COMMENT",
-      message: "Failed to post AI comment",
-      statusCode: aiComment instanceof Error ? 502 : aiComment.status,
-      cause: responseDetails,
-    });
-  }
-};
-
-interface SearchRepositoryParams {
-  query: string;
-  ref: string;
+  url.searchParams.set("ref", ref);
+  const res = await gitlabRequest(
+    url,
+    { headers },
+    "FILE_FETCH_FAILED",
+    `Failed to fetch file "${filePath}" at ref "${ref}"`,
+  );
+  return res instanceof Error ? res : res.text();
 }
+
+export async function postMergeRequestNote(
+  params: MergeRequestApi & { note: string },
+): Promise<void | GitLabError> {
+  const res = await gitlabRequest(
+    mergeRequestUrl(params, "/notes"),
+    postJson(params.headers, { body: neutralizeQuickActions(params.note) }),
+    "FAILED_TO_POST_COMMENT",
+    "Failed to post AI comment",
+  );
+  return res instanceof Error ? res : undefined;
+}
+
 interface SearchBlobResult {
   path: string;
   data: string;
   startline: number;
   ref: string;
 }
-type SearchRepositoryResult = SearchBlobResult[] | GitLabError;
-export const searchRepository: GitLabFetchFunction<
-  SearchRepositoryParams,
-  SearchRepositoryResult
-> = async ({ gitLabProjectApiUrl, headers, query, ref}) => {
+
+export async function searchRepository(
+  params: GitLabApi & { query: string; ref: string },
+): Promise<SearchBlobResult[] | GitLabError> {
+  const { gitLabProjectApiUrl, headers, query, ref } = params;
   const url = new URL(`${gitLabProjectApiUrl}/search`);
   url.searchParams.set("scope", "blobs");
   url.searchParams.set("search", query);
   url.searchParams.set("ref", ref);
   // Name matches come before content matches; the grep tool re-ranks and keeps 10.
   url.searchParams.set("per_page", "50");
-  let res: Response | Error;
-  try {
-    res = await fetchWithRetry(url, { headers: { ...headers } });
-  } catch (error: any) {
-    res = error;
-  }
-  if (res instanceof Error || !res.ok) {
-    const responseDetails = await (async () => {
-      if (res instanceof Error) {
-        return {
-          url: url.toString(),
-          error: { name: res.name, message: res.message },
-        };
-      }
-      const bodyText = await res.text().catch(() => "");
-      return {
-        url: url.toString(),
-        status: res.status,
-        statusText: res.statusText,
-        body: bodyText.slice(0, 1000),
-      };
-    })();
-    return new GitLabError({
-      name: "SEARCH_FAILED",
-      message: `Repository search failed for query "${query}"`,
-      statusCode: res instanceof Error ? 502 : res.status,
-      cause: responseDetails,
-    });
-  }
-  return (await res.json()) as SearchBlobResult[];
-};
+  const res = await gitlabRequest(
+    url,
+    { headers },
+    "SEARCH_FAILED",
+    `Repository search failed for query "${query}"`,
+  );
+  return res instanceof Error ? res : ((await res.json()) as SearchBlobResult[]);
+}
 
 interface MergeRequestChangesDiffRef {
   base_sha?: string;
@@ -230,90 +170,25 @@ interface MergeRequestChangesResponse {
   changes?: MergeRequestChange[];
   diff_refs?: MergeRequestChangesDiffRef;
   target_branch?: string;
+  /** GitLab hit its diff size limits and returned only part of the changes. */
   overflow?: boolean;
 }
 
-interface FetchMergeRequestChangesParams {
-  mergeRequestIid: string | number;
-}
-type FetchMergeRequestChangesResult = MergeRequestChangesResponse | GitLabError;
-export const fetchMergeRequestChanges: GitLabFetchFunction<
-  FetchMergeRequestChangesParams,
-  FetchMergeRequestChangesResult
-> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid }) => {
-  const url = new URL(
-    `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/changes`,
-  );
+export async function fetchMergeRequestChanges(
+  params: MergeRequestApi,
+): Promise<MergeRequestChangesResponse | GitLabError> {
+  const url = mergeRequestUrl(params, "/changes");
   // Ask GitLab for raw diffs to reduce truncation on larger merge requests.
   url.searchParams.set("access_raw_diffs", "true");
-  let res: Response | Error;
-
-  try {
-    res = await fetchWithRetry(url, { headers: { ...headers } });
-  } catch (error: any) {
-    res = error;
-  }
-
-  if (res instanceof Error || !res.ok) {
-    const responseDetails = await (async () => {
-      if (res instanceof Error) {
-        return {
-          url: url.toString(),
-          error: {
-            name: res.name,
-            message: res.message,
-            stack: res.stack,
-          },
-        };
-      }
-      const bodyText = await res.text().catch(() => "");
-      return {
-        url: url.toString(),
-        status: res.status,
-        statusText: res.statusText,
-        body: bodyText.slice(0, 4000),
-      };
-    })();
-
-    return new GitLabError({
-      name: "MISSING_DIFF",
-      message: "Failed to fetch merge request changes",
-      statusCode: res instanceof Error ? 502 : res.status,
-      cause: responseDetails,
-    });
-  }
-
-  return (await res.json()) as MergeRequestChangesResponse;
-};
-
-/** fetch with the same error details as above, for the inline-comment calls. */
-async function gitlabRequest(
-  url: URL,
-  init: RequestInit,
-  message: string,
-): Promise<Response | GitLabError> {
-  let res: Response | Error;
-  try {
-    res = await fetchWithRetry(url, init);
-  } catch (error: any) {
-    res = error;
-  }
-  if (!(res instanceof Error) && res.ok) return res;
-  const cause =
-    res instanceof Error
-      ? { url: url.toString(), error: { name: res.name, message: res.message } }
-      : {
-          url: url.toString(),
-          status: res.status,
-          statusText: res.statusText,
-          body: (await res.text().catch(() => "")).slice(0, 1000),
-        };
-  return new GitLabError({
-    name: "INLINE_COMMENTS_FAILED",
-    message,
-    statusCode: res instanceof Error ? 502 : res.status,
-    cause,
-  });
+  const res = await gitlabRequest(
+    url,
+    { headers: params.headers },
+    "MISSING_DIFF",
+    "Failed to fetch merge request changes",
+  );
+  return res instanceof Error
+    ? res
+    : ((await res.json()) as MergeRequestChangesResponse);
 }
 
 export interface DiffPosition {
@@ -337,39 +212,33 @@ export interface MergeRequestDiscussion {
   }>;
 }
 
-interface MergeRequestParams {
-  mergeRequestIid: string | number;
-}
-
-export const fetchMergeRequestDiffRefs: GitLabFetchFunction<
-  MergeRequestParams,
-  MergeRequestChangesDiffRef | GitLabError
-> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid }) => {
+export async function fetchMergeRequestDiffRefs(
+  params: MergeRequestApi,
+): Promise<MergeRequestChangesDiffRef | GitLabError> {
   const res = await gitlabRequest(
-    new URL(`${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}`),
-    { headers: { ...headers } },
+    mergeRequestUrl(params),
+    { headers: params.headers },
+    "INLINE_COMMENTS_FAILED",
     "Failed to fetch merge request",
   );
   if (res instanceof Error) return res;
   const mr = (await res.json()) as { diff_refs?: MergeRequestChangesDiffRef };
   return mr.diff_refs ?? {};
-};
+}
 
-export const listMergeRequestDiscussions: GitLabFetchFunction<
-  MergeRequestParams,
-  MergeRequestDiscussion[] | GitLabError
-> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid }) => {
+export async function listMergeRequestDiscussions(
+  params: MergeRequestApi,
+): Promise<MergeRequestDiscussion[] | GitLabError> {
   const discussions: MergeRequestDiscussion[] = [];
   // ponytail: reads at most 50 pages (5000 threads); raise if an MR ever has more.
   for (let page = 1; page <= 50; page += 1) {
-    const url = new URL(
-      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions`,
-    );
+    const url = mergeRequestUrl(params, "/discussions");
     url.searchParams.set("per_page", "100");
     url.searchParams.set("page", String(page));
     const res = await gitlabRequest(
       url,
-      { headers: { ...headers } },
+      { headers: params.headers },
+      "INLINE_COMMENTS_FAILED",
       "Failed to list merge request threads",
     );
     if (res instanceof Error) return res;
@@ -381,70 +250,46 @@ export const listMergeRequestDiscussions: GitLabFetchFunction<
     if (next === "" || (next == null && batch.length < 100)) break;
   }
   return discussions;
-};
-
-interface CreateMergeRequestDiscussionParams extends MergeRequestParams {
-  body: string;
-  position: DiffPosition;
 }
-export const createMergeRequestDiscussion: GitLabFetchFunction<
-  CreateMergeRequestDiscussionParams,
-  void | GitLabError
-> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid, body, position }) => {
+
+export async function createMergeRequestDiscussion(
+  params: MergeRequestApi & { body: string; position: DiffPosition },
+): Promise<void | GitLabError> {
+  const { position } = params;
   const res = await gitlabRequest(
-    new URL(
-      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions`,
-    ),
-    {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ body: neutralizeQuickActions(body), position }),
-    },
+    mergeRequestUrl(params, "/discussions"),
+    postJson(params.headers, { body: neutralizeQuickActions(params.body), position }),
+    "INLINE_COMMENTS_FAILED",
     `Failed to create a diff thread at ${position.new_path}:${position.new_line}`,
   );
   return res instanceof Error ? res : undefined;
-};
-
-interface ResolveMergeRequestDiscussionParams extends MergeRequestParams {
-  discussionId: string;
 }
-export const resolveMergeRequestDiscussion: GitLabFetchFunction<
-  ResolveMergeRequestDiscussionParams,
-  void | GitLabError
-> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid, discussionId }) => {
-  const url = new URL(
-    `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions/${discussionId}`,
-  );
+
+export async function resolveMergeRequestDiscussion(
+  params: MergeRequestApi & { discussionId: string },
+): Promise<void | GitLabError> {
+  const url = mergeRequestUrl(params, `/discussions/${params.discussionId}`);
   url.searchParams.set("resolved", "true");
   const res = await gitlabRequest(
     url,
-    { method: "PUT", headers: { ...headers } },
-    `Failed to resolve thread ${discussionId}`,
+    { method: "PUT", headers: params.headers },
+    "INLINE_COMMENTS_FAILED",
+    `Failed to resolve thread ${params.discussionId}`,
   );
   return res instanceof Error ? res : undefined;
-};
-
-interface ReplyToMergeRequestDiscussionParams extends MergeRequestParams {
-  discussionId: string;
-  body: string;
 }
-export const replyToMergeRequestDiscussion: GitLabFetchFunction<
-  ReplyToMergeRequestDiscussionParams,
-  void | GitLabError
-> = async ({ gitLabProjectApiUrl, headers, mergeRequestIid, discussionId, body }) => {
+
+export async function replyToMergeRequestDiscussion(
+  params: MergeRequestApi & { discussionId: string; body: string },
+): Promise<void | GitLabError> {
   const res = await gitlabRequest(
-    new URL(
-      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/discussions/${discussionId}/notes`,
-    ),
-    {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ body: neutralizeQuickActions(body) }),
-    },
-    `Failed to reply to thread ${discussionId}`,
+    mergeRequestUrl(params, `/discussions/${params.discussionId}/notes`),
+    postJson(params.headers, { body: neutralizeQuickActions(params.body) }),
+    "INLINE_COMMENTS_FAILED",
+    `Failed to reply to thread ${params.discussionId}`,
   );
   return res instanceof Error ? res : undefined;
-};
+}
 
 /** Hidden marker that lets later runs find this tool's summary note. */
 export const SUMMARY_MARKER = "<!-- gitlab-ai-review:summary -->";
@@ -458,19 +303,14 @@ interface MergeRequestNote {
 /** Id of the token user's earlier summary note on this MR, or null. Notes are
  *  listed most recently updated first, and every run updates the summary, so it
  *  is normally on the first page. */
-async function findSummaryNote({
-  gitLabProjectApiUrl,
-  headers,
-  mergeRequestIid,
-}: {
-  gitLabProjectApiUrl: URL;
-  headers: GitLabFetchHeaders;
-  mergeRequestIid: string | number;
-}): Promise<number | null | GitLabError> {
+async function findSummaryNote(
+  params: MergeRequestApi,
+): Promise<number | null | GitLabError> {
   // gitLabProjectApiUrl is <api>/projects/<id>, so ../user is <api>/user.
   const me = await gitlabRequest(
-    new URL("../user", gitLabProjectApiUrl),
-    { headers: { ...headers } },
+    new URL("../user", params.gitLabProjectApiUrl),
+    { headers: params.headers },
+    "FAILED_TO_POST_COMMENT",
     "Failed to read the token's user",
   );
   if (me instanceof Error) return me;
@@ -478,16 +318,15 @@ async function findSummaryNote({
   if (myId == null) return null;
   // ponytail: reads at most 20 pages (2000 notes); past that a new note is posted.
   for (let page = 1; page <= 20; page += 1) {
-    const url = new URL(
-      `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes`,
-    );
+    const url = mergeRequestUrl(params, "/notes");
     url.searchParams.set("order_by", "updated_at");
     url.searchParams.set("sort", "desc");
     url.searchParams.set("per_page", "100");
     url.searchParams.set("page", String(page));
     const res = await gitlabRequest(
       url,
-      { headers: { ...headers } },
+      { headers: params.headers },
+      "FAILED_TO_POST_COMMENT",
       "Failed to list merge request notes",
     );
     if (res instanceof Error) return res;
@@ -506,14 +345,10 @@ async function findSummaryNote({
 /** Posts the review as the MR's summary note. Later runs edit their own earlier
  *  note (found by marker and author) instead of stacking a new comment on every
  *  push; when it can't be found or edited, a new note is posted. */
-export async function upsertSummaryNote(params: {
-  gitLabProjectApiUrl: URL;
-  headers: GitLabFetchHeaders;
-  mergeRequestIid: string | number;
-  note: string;
-  logStep: (message: string) => void;
-}): Promise<"updated" | "created" | GitLabError> {
-  const { gitLabProjectApiUrl, headers, mergeRequestIid, logStep } = params;
+export async function upsertSummaryNote(
+  params: MergeRequestApi & { note: string; logStep: (message: string) => void },
+): Promise<"updated" | "created" | GitLabError> {
+  const { logStep } = params;
   const note = `${params.note}\n\n${SUMMARY_MARKER}`;
   const existing = await findSummaryNote(params);
   if (existing instanceof Error) {
@@ -522,14 +357,9 @@ export async function upsertSummaryNote(params: {
     );
   } else if (existing != null) {
     const res = await gitlabRequest(
-      new URL(
-        `${gitLabProjectApiUrl}/merge_requests/${mergeRequestIid}/notes/${existing}`,
-      ),
-      {
-        method: "PUT",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ body: neutralizeQuickActions(note) }),
-      },
+      mergeRequestUrl(params, `/notes/${existing}`),
+      { ...postJson(params.headers, { body: neutralizeQuickActions(note) }), method: "PUT" },
+      "FAILED_TO_POST_COMMENT",
       "Failed to update AI comment",
     );
     if (!(res instanceof Error)) return "updated";
@@ -537,11 +367,6 @@ export async function upsertSummaryNote(params: {
       `Could not update the earlier AI review note (HTTP ${res.statusCode}); posting a new one.`,
     );
   }
-  const res = await postMergeRequestNote({
-    gitLabProjectApiUrl,
-    headers,
-    mergeRequestIid,
-    note,
-  });
+  const res = await postMergeRequestNote({ ...params, note });
   return res instanceof Error ? res : "created";
 }
