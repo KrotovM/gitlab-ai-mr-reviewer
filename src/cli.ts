@@ -4,24 +4,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { readFile } from "node:fs/promises";
-import {
-  DEFAULT_MAX_FINDINGS,
-  DEFAULT_REVIEW_CONCURRENCY,
-} from "./prompt/index.js";
+import { parsePromptProfile } from "./prompt/index.js";
 import {
   envOrDefault,
   envOrUndefined,
-  hasDebugFlag,
-  hasForceToolsFlag,
-  hasIncludeArtifactsFlag,
-  hasIgnoredExtension,
   isGeneratedFile,
-  hasInlineCommentsFlag,
-  parseIgnoreExtensions,
-  parseNumberFlag,
-  parsePromptLimits,
-  parseTriageDiffChars,
-  readPromptProfileFromEnv,
+  parseCliArgs,
   requireEnvs,
 } from "./cli/args.js";
 import { DEFAULT_ANTHROPIC_MODEL } from "./cli/anthropic.js";
@@ -41,19 +29,17 @@ function printHelp(): void {
     `gitlab-ai-review
 
 Usage:
-  gitlab-ai-review
-  gitlab-ai-review --help
-  gitlab-ai-review --debug
-  gitlab-ai-review --ignore-ext=md,lock
+  gitlab-ai-review [options]
 
-Debug:
+Options:
+  --help, -h     Show this help.
   --debug        Print full error details (stack, API error fields).
   --include-artifacts  Generate local HTML artifact without printing payloads to console.
   --force-tools  Force at least one tool-call round in tool-enabled review paths (openai only).
-  --ignore-ext   Ignore file extensions (comma-separated only). Example: --ignore-ext=md,lock
-  --max-diffs=50
-  --max-diff-chars=16000
-  --max-total-prompt-chars=220000
+  --ignore-ext   Ignore file extensions (comma-separated). Example: --ignore-ext=md,lock
+  --max-diffs=50             Max file diffs in the single-pass fallback prompt.
+  --max-diff-chars=16000     Max chars per file diff (per-file review and single-pass).
+  --max-total-prompt-chars=220000  Prompt size cap (triage and single-pass).
   --triage-diff-chars=2000   Max chars per file diff in triage pass (Pass 1).
   --max-findings=5          Max findings in final review (CI multi-pass only).
   --max-review-concurrency=2  Parallel per-file review calls (CI multi-pass only).
@@ -79,20 +65,6 @@ CI-only env vars (provided by GitLab):
   );
 }
 
-const DEBUG_MODE = hasDebugFlag(process.argv);
-const FORCE_TOOLS = hasForceToolsFlag(process.argv);
-const INCLUDE_ARTIFACTS = hasIncludeArtifactsFlag(process.argv);
-const INLINE_COMMENTS = hasInlineCommentsFlag(process.argv);
-
-function logStep(message: string): void {
-  process.stdout.write(`${message}\n`);
-}
-
-function logDebug(message: string): void {
-  if (!DEBUG_MODE) return;
-  process.stdout.write(`[debug] ${message}\n`);
-}
-
 async function getCliVersion(): Promise<string> {
   try {
     const packageJsonUrl = new URL("../package.json", import.meta.url);
@@ -108,32 +80,26 @@ async function getCliVersion(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const args = new Set(process.argv.slice(2));
-  if (args.has("--help") || args.has("-h")) {
+  const options = parseCliArgs(process.argv.slice(2));
+  if (options.help) {
     printHelp();
     return;
   }
+  const logStep = (message: string): void => {
+    process.stdout.write(`${message}\n`);
+  };
+  const logDebug = (message: string): void => {
+    if (options.debug) process.stdout.write(`[debug] ${message}\n`);
+  };
 
   const cliVersion = await getCliVersion();
   logStep(`gitlab-ai-review v${cliVersion}`);
-  const ignoredExtensions = parseIgnoreExtensions(process.argv);
-  const promptLimits = parsePromptLimits(process.argv);
-  const triageDiffChars = parseTriageDiffChars(process.argv);
-  const maxFindings = parseNumberFlag(
-    process.argv,
-    "max-findings",
-    DEFAULT_MAX_FINDINGS,
-    1,
-  );
-  const envConcurrency = Number(envOrUndefined("AI_REVIEW_CONCURRENCY"));
-  const reviewConcurrency = parseNumberFlag(
-    process.argv,
-    "max-review-concurrency",
-    Number.isFinite(envConcurrency) && envConcurrency >= 1
-      ? Math.floor(envConcurrency)
-      : DEFAULT_REVIEW_CONCURRENCY,
-    1,
-  );
+  if (options.ignoredArgs.length > 0) {
+    logStep(
+      `Warning: ignoring unrecognized argument(s): ${options.ignoredArgs.join(", ")}. See --help for the supported flags.`,
+    );
+  }
+  const { ignoredExtensions } = options;
   const provider = envOrDefault("AI_PROVIDER", "openai").toLowerCase();
   if (provider !== "openai" && provider !== "anthropic") {
     throw new Error(
@@ -144,21 +110,21 @@ async function main(): Promise<void> {
     "AI_MODEL",
     provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : "gpt-4o-mini",
   );
-  const promptProfile = readPromptProfileFromEnv();
+  const promptProfile = parsePromptProfile(envOrUndefined("AI_PROMPT_PROFILE"));
   const allowProfileAutoDemote = envOrUndefined("AI_PROMPT_PROFILE") == null;
   logStep(
     `Prompt profile: ${promptProfile}${allowProfileAutoDemote ? " (auto: falls back to weak if triage JSON fails)" : ""}`,
   );
-  const artifactHtmlFile = INCLUDE_ARTIFACTS
-    ? envOrDefault("AI_REVIEW_ARTIFACT_HTML_FILE", "ai-review-report.html")
-    : undefined;
+  const artifactHtmlFile = envOrDefault(
+    "AI_REVIEW_ARTIFACT_HTML_FILE",
+    "ai-review-report.html",
+  );
   const artifactRecords: Record<string, any>[] = [];
-  const debugRecordWriter = INCLUDE_ARTIFACTS
-    ? async (record: Record<string, unknown>) => {
-        artifactRecords.push(record as Record<string, any>);
+  const debugRecordWriter = options.includeArtifacts
+    ? (record: Record<string, unknown>) => {
+        artifactRecords.push(record);
       }
     : undefined;
-  let artifactWritten = false;
 
   const loggers = { logStep, logDebug };
 
@@ -190,12 +156,17 @@ async function main(): Promise<void> {
   try {
     logStep("Fetching merge request changes");
     const mrChanges = await fetchMergeRequestChanges({
-      gitLabProjectApiUrl: gitLabProjectApiUrl,
+      gitLabProjectApiUrl,
       headers,
       mergeRequestIid,
     });
     if (mrChanges instanceof Error) throw mrChanges;
 
+    if (mrChanges.overflow === true) {
+      logStep(
+        "Warning: GitLab truncated this merge request's changes (diff size limits); only the returned files are reviewed.",
+      );
+    }
     const allChanges = mrChanges.changes ?? [];
     const reviewable = allChanges.filter(
       (change) => change.diff.trim() !== "" && !isGeneratedFile(change.new_path),
@@ -208,11 +179,10 @@ async function main(): Promise<void> {
         `Skipping ${skipped.length} file(s) with no diff text (renames, binaries) or generated content (lockfiles, minified, snapshots): ${skipped.slice(0, 10).join(", ")}${skipped.length > 10 ? ", …" : ""}`,
       );
     }
+    const ignored = (path: string) =>
+      ignoredExtensions.some((ext) => path.toLowerCase().endsWith(ext));
     const filteredChanges = reviewable.filter(
-      (change) =>
-        ignoredExtensions.length === 0 ||
-        (!hasIgnoredExtension(change.new_path, ignoredExtensions) &&
-          !hasIgnoredExtension(change.old_path, ignoredExtensions)),
+      (change) => !ignored(change.new_path) && !ignored(change.old_path),
     );
 
     if (filteredChanges.length === 0) {
@@ -238,18 +208,18 @@ async function main(): Promise<void> {
           ? new Anthropic({ apiKey })
           : new OpenAI({ apiKey }),
       aiModel,
-      promptLimits,
-      triageDiffChars,
+      promptLimits: options.promptLimits,
+      triageDiffChars: options.triageDiffChars,
       changes: filteredChanges,
       refs: {
         base: mrChanges.diff_refs?.base_sha ?? "HEAD",
         head: mrChanges.diff_refs?.head_sha ?? "HEAD",
       },
-      gitLabProjectApiUrl: gitLabProjectApiUrl,
+      gitLabProjectApiUrl,
       headers,
-      maxFindings,
-      reviewConcurrency,
-      forceTools: FORCE_TOOLS,
+      maxFindings: options.maxFindings,
+      reviewConcurrency: options.reviewConcurrency,
+      forceTools: options.forceTools,
       promptProfile,
       allowProfileAutoDemote,
       reviewInstructions,
@@ -257,7 +227,7 @@ async function main(): Promise<void> {
       debugRecordWriter,
     });
 
-    const note = INLINE_COMMENTS
+    const note = options.inlineComments
       ? await postInlineFindings({
           answer,
           changes: filteredChanges,
@@ -285,7 +255,7 @@ async function main(): Promise<void> {
         : "Posted AI review comment to merge request.\n",
     );
   } finally {
-    if (INCLUDE_ARTIFACTS && artifactHtmlFile != null && !artifactWritten) {
+    if (options.includeArtifacts) {
       try {
         await renderDebugArtifactsHtml({
           records: artifactRecords,
@@ -293,7 +263,6 @@ async function main(): Promise<void> {
           cliVersion,
           aiModel,
         });
-        artifactWritten = true;
       } catch (artifactError: any) {
         const message =
           artifactError instanceof Error
@@ -314,7 +283,7 @@ main().catch((err) => {
   if (anyErr?.name === "FAILED_TO_POST_COMMENT" && anyErr?.cause != null) {
     process.stderr.write(`Cause: ${JSON.stringify(anyErr.cause)}\n`);
   }
-  if (hasDebugFlag(process.argv)) {
+  if (process.argv.includes("--debug")) {
     if (err instanceof Error && err.stack != null) {
       process.stderr.write(`\nStack:\n${err.stack}\n`);
     }

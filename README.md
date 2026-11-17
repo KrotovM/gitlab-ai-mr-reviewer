@@ -97,17 +97,20 @@ GitLab provides these automatically in Merge Request pipelines:
 
 ## Flags
 
-- `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated only). Lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `go.sum`, …), minified bundles, source maps, test snapshots, and files with no diff text (pure renames, binaries) are always skipped.
-- `--max-diffs=50` - Max number of diffs included in the prompt.
-- `--max-diff-chars=16000` - Max chars per diff chunk (single-pass fallback only).
-- `--max-total-prompt-chars=220000` - Final hard cap for prompt size (single-pass fallback only).
+- `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated). Lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `go.sum`, …), minified bundles, source maps, test snapshots, and files with no diff text (pure renames, binaries) are always skipped.
+- `--max-diffs=50` - Max number of diffs included in the prompt (single-pass fallback only).
+- `--max-diff-chars=16000` - Max chars per file diff (per-file review and single-pass fallback).
+- `--max-total-prompt-chars=220000` - Hard cap for prompt size (triage and single-pass fallback). On large MRs triage shortens each file diff below `--triage-diff-chars` to stay under it.
 - `--triage-diff-chars=2000` - Max chars per file diff sent to the triage pass (Pass 1). Increase for large diffs where the first hunks are mostly git headers.
 - `--max-findings=5` - Max findings in the final review (CI multi-pass only).
 - `--max-review-concurrency=2` - Parallel per-file review API calls (CI multi-pass only). Set to 1 for single-GPU backends that queue-starve long requests.
+- `--force-tools` - Force a tool call in the first round of each tool-enabled pass (OpenAI only).
 - `--debug` - Print full error details (stack and API error fields).
 - `--include-artifacts` - Generate a local HTML debug artifact with per-pass outputs/tokens.
 - `--inline-comments` - Post findings on changed lines as resolvable diff threads; the rest stays in the summary comment. See [Inline comments](#inline-comments).
 - `--help` - Show help output.
+
+Unknown flags (and a flag with a missing or unexpected value) don't fail the job: they are ignored and listed in a warning at the top of the job log, so check it after changing flags.
 
 ## Inline comments
 
@@ -161,7 +164,7 @@ Notes:
 The reviewer uses a four-pass pipeline optimized for large merge requests:
 
 1. **Triage** - A fast LLM pass classifies each changed file as `NEEDS_REVIEW` or `SKIP`, with a per-file `reason`, and generates a short MR summary. Each file diff is truncated to `--triage-diff-chars` (default 2000).
-2. **Per-file review** - Only `NEEDS_REVIEW` files are reviewed (if triage marks every file `SKIP`, all files are reviewed anyway). Each reviewed file gets a dedicated LLM call running in parallel (with tools to fetch full files or grep the repository).
+2. **Per-file review** - Only `NEEDS_REVIEW` files are reviewed (if triage marks every file `SKIP`, all files are reviewed anyway). Each reviewed file gets a dedicated LLM call running in parallel (with tools to fetch full files or grep the repository). A file whose review call fails is listed as not reviewed in the MR comment.
 3. **Consolidate** - Per-file findings are merged, deduplicated, ranked by severity, and trimmed to top N (default 5).
 4. **Verify** - A skeptical pass checks the consolidated findings against the repository at the MR head (with the same tools), drops the ones the code contradicts or it can't confirm, and corrects line numbers.
 

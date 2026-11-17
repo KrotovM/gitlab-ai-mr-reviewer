@@ -3,12 +3,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleGetFileTool } from "../dist/cli/ci-review.js";
 
-const api = new URL("https://gitlab.example.com/api/v4/projects/1");
+const ctx = {
+  gitLabProjectApiUrl: new URL("https://gitlab.example.com/api/v4/projects/1"),
+  headers: {},
+  loggers: { logStep: () => {}, logDebug: () => {} },
+};
 
 const read = async (fileText, args) => {
   globalThis.fetch = async () => new Response(fileText);
   return JSON.parse(
-    await handleGetFileTool(JSON.stringify({ path: "a.ts", ref: "h", ...args }), api, {}, () => {}),
+    await handleGetFileTool(ctx, JSON.stringify({ path: "a.ts", ref: "h", ...args })),
   );
 };
 

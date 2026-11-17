@@ -22,6 +22,7 @@ export async function renderDebugArtifactsHtml(params: {
   const responses = records.filter((r) => r.kind === "openai_response");
   const requests = records.filter((r) => r.kind === "openai_request");
   const errors = records.filter((r) => r.kind === "openai_error");
+  const toolCalls = records.filter((r) => r.kind === "tool_call");
 
   const byLabel = new Map<string, Record<string, any>>();
   for (const response of responses) {
@@ -225,9 +226,6 @@ export async function renderDebugArtifactsHtml(params: {
       const c = getContent(lbl);
       if (c.trim() !== "") return { label: lbl, content: c };
     }
-    const legacy = getContent("verification_pass");
-    if (legacy.trim() !== "")
-      return { label: "verification_pass", content: legacy };
     return { label: "verification_pass_round_1", content: "" };
   }
 
@@ -305,6 +303,39 @@ export async function renderDebugArtifactsHtml(params: {
         .join("\n")}
     </div>`;
 
+  function toolOutcome(result: unknown): string {
+    try {
+      const r = JSON.parse(String(result));
+      if (r.ok !== true)
+        return `error${r.status != null ? ` ${r.status}` : ""}: ${r.error ?? ""}`;
+      if (Array.isArray(r.matches)) return `${r.matches.length} match(es)`;
+      return r.truncated === true ? "ok (truncated)" : "ok";
+    } catch {
+      return String(result ?? "").slice(0, 120);
+    }
+  }
+  const toolSection =
+    toolCalls.length === 0
+      ? ""
+      : `<h2>Tool Calls</h2>
+    <div class="section">
+      <table>
+        <thead>
+          <tr style="text-align:left;color:var(--muted);">
+            ${["Pass", "Round", "Tool", "Arguments", "Result"].map((h) => `<th style="padding:6px 8px;border-bottom:1px solid var(--line);">${h}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+${toolCalls
+  .map(
+    (t) =>
+      `<tr>${cell(escapeHtml(String(t.context ?? t.phase ?? "")))}${cell(escapeHtml(String(t.round ?? "")))}${cell(`<code>${escapeHtml(String(t.name ?? ""))}</code>`)}${cell(`<code>${escapeHtml(String(t.arguments ?? "").slice(0, 200))}</code>`)}${cell(escapeHtml(toolOutcome(t.result)))}</tr>`,
+  )
+  .join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -340,6 +371,7 @@ export async function renderDebugArtifactsHtml(params: {
       <div class="card"><div class="k">Errors</div><div class="v${errors.length > 0 ? " bad" : ""}">${escapeHtml(String(errors.length))}</div></div>
       <div class="card"><div class="k">Total tokens</div><div class="v">${escapeHtml(totalTokensText)}</div></div>
       <div class="card"><div class="k">Wall time</div><div class="v">${escapeHtml(wallText)}</div></div>
+      <div class="card"><div class="k">Tool calls</div><div class="v">${escapeHtml(String(toolCalls.length))}</div></div>
       <div class="card"><div class="k">Final Status</div><div class="v ok">${escapeHtml(finalStatus)}</div></div>
     </div>
 
@@ -386,6 +418,7 @@ ${totalRow}
       ${sectionHeader(`label: ${verificationSection.label}`, verificationLabels)}
       ${renderFindings(verificationSection.content)}
     </div>
+    ${toolSection}
   </div>
 </body>
 </html>`;

@@ -1,14 +1,7 @@
 /** @format */
 
+import type { TriageFileInput } from "../index.js";
 import { truncateWithMarker } from "../utils.js";
-
-type TriageFileInputTemplate = {
-  path: string;
-  new_file?: boolean;
-  deleted_file?: boolean;
-  renamed_file?: boolean;
-  diff: string;
-};
 
 const LINE_NUMBERS_NOTE =
   "Each diff line starts with its line number in the new file (removed lines have none); use these numbers for Line:.";
@@ -30,7 +23,7 @@ Produce your review now. Follow the system instructions strictly.`;
 }
 
 export function buildTriageUserContent(
-  changes: TriageFileInputTemplate[],
+  changes: TriageFileInput[],
   maxDiffChars: number,
 ): string {
   const fileEntries = changes.map((c) => {

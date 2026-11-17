@@ -2,7 +2,11 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import type { ChatCompletionMessageParam } from "openai/resources/index.mjs";
+import type {
+  ChatCompletion,
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from "openai/resources/index.mjs";
 import { createAnthropicCompletion } from "./anthropic.js";
 import {
   buildAnswer,
@@ -14,16 +18,17 @@ import {
   DEFAULT_PROMPT_PROFILE,
   DISCLAIMER,
   extractCompletionText,
+  insertBeforeDisclaimer,
   isEmptyReviewBody,
   MAX_REVIEW_INSTRUCTIONS_CHARS,
   NO_FINDINGS_SENTENCE,
+  NOT_REVIEWED_NOTE,
   parseTriageResponseDetailed,
-  parseTriageResponse,
   type PromptLimits,
   type PromptProfile,
   type TriageFileInput,
-  type TriageParseFailureReason,
   type TriageFileVerdict,
+  type TriageResult,
   withReviewInstructions,
 } from "../prompt/index.js";
 import {
@@ -64,6 +69,30 @@ type LoggerFns = {
   logDebug: (message: string) => void;
 };
 type DebugRecordWriter = (record: Record<string, unknown>) => Promise<void> | void;
+type Refs = { base: string; head: string };
+
+/** What every model call and tool call of one review run needs. */
+type RunContext = {
+  llm: OpenAI | Anthropic;
+  aiModel: string;
+  refs: Refs;
+  gitLabProjectApiUrl: URL;
+  headers: Record<string, string>;
+  forceTools: boolean;
+  /** Repository REVIEW.md (see loadReviewInstructions), appended to every pass. */
+  reviewInstructions?: string;
+  loggers: LoggerFns;
+  debugRecordWriter?: DebugRecordWriter;
+};
+
+type CompletionRequest = {
+  model: string;
+  temperature: number;
+  messages: ChatCompletionMessageParam[];
+  tools?: ChatCompletionTool[];
+  tool_choice?: "auto" | "required";
+  response_format?: { type: "json_object" };
+};
 
 type TriageReviewAction = "review" | "skipped" | "reviewed_via_override";
 
@@ -73,7 +102,7 @@ type TriageFileDecision = TriageFileVerdict & {
 
 function buildTriageDecisions(params: {
   changes: MergeRequestChange[];
-  triageResult: { summary: string; files: TriageFileVerdict[] };
+  triageResult: TriageResult;
 }): { decisions: TriageFileDecision[]; skipAllOverride: boolean; reviewFiles: MergeRequestChange[] } {
   const { changes, triageResult } = params;
   const triageMap = new Map(triageResult.files.map((f) => [f.path, f]));
@@ -124,52 +153,45 @@ function formatTriageDecisionLine(decision: TriageFileDecision): string {
   }
 }
 
-async function appendDebugDump(
-  _debugDumpFile: string | undefined,
-  debugRecordWriter: DebugRecordWriter | undefined,
-  record: Record<string, unknown>,
+async function record(
+  ctx: RunContext,
+  entry: Record<string, unknown>,
 ): Promise<void> {
-  const withTs = { ts: new Date().toISOString(), ...record };
-  if (debugRecordWriter != null) {
-    await debugRecordWriter(withTs);
-  }
+  await ctx.debugRecordWriter?.({ ts: new Date().toISOString(), ...entry });
 }
 
-async function createCompletionWithDebug(params: {
-  llm: OpenAI | Anthropic;
-  requestLabel: string;
-  request: any;
-  debugDumpFile?: string;
-  debugRecordWriter?: DebugRecordWriter;
-}): Promise<any> {
-  const { llm, requestLabel, request, debugDumpFile, debugRecordWriter } =
-    params;
-  await appendDebugDump(debugDumpFile, debugRecordWriter, {
-    kind: "openai_request",
-    label: requestLabel,
-    request,
-  });
+async function complete(
+  ctx: RunContext,
+  label: string,
+  request: CompletionRequest,
+): Promise<ChatCompletion> {
+  const { llm } = ctx;
+  await record(ctx, { kind: "openai_request", label, request });
   // Stream and reassemble: reverse proxies (nginx proxy_read_timeout) return 504 on
   // long silent non-streamed completions; streamed chunks keep the connection alive.
   // The SDK's own timeout only covers time-to-headers; a stalled SSE body would hang
   // forever without the explicit AbortSignal deadline.
-  const { stream: _stream, ...createParams } = request;
-  const attempt = () => {
+  const attempt = (): Promise<ChatCompletion> => {
     if (llm instanceof Anthropic) {
       return createAnthropicCompletion(
         llm,
-        createParams,
+        request,
         AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
       );
     }
-    const body = { ...createParams, stream_options: { include_usage: true } };
+    const body: Record<string, unknown> = {
+      ...request,
+      stream_options: { include_usage: true },
+    };
     for (const param of droppedParams) delete body[param];
     return llm.chat.completions
-      .stream(body, { signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS) })
+      .stream(body as CompletionRequest, {
+        signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
+      })
       .finalChatCompletion();
   };
   try {
-    let completion: any;
+    let completion: ChatCompletion;
     // Each retry drops one more param, so this ends after OPTIONAL_PARAMS.length retries.
     for (;;) {
       try {
@@ -185,14 +207,14 @@ async function createCompletionWithDebug(params: {
         droppedParams.add(rejected);
       }
     }
-    await appendDebugDump(debugDumpFile, debugRecordWriter, {
+    await record(ctx, {
       kind: "openai_response",
-      label: requestLabel,
+      label,
       response: {
         id: completion.id,
         model: completion.model,
-        usage: (completion as any).usage,
-        choices: completion.choices.map((c: any) => ({
+        usage: completion.usage,
+        choices: completion.choices.map((c) => ({
           index: c.index,
           finish_reason: c.finish_reason,
           message: c.message,
@@ -201,9 +223,9 @@ async function createCompletionWithDebug(params: {
     });
     return completion;
   } catch (error: any) {
-    await appendDebugDump(debugDumpFile, debugRecordWriter, {
+    await record(ctx, {
       kind: "openai_error",
-      label: requestLabel,
+      label,
       error: {
         name: error?.name,
         message: error?.message,
@@ -216,10 +238,7 @@ async function createCompletionWithDebug(params: {
   }
 }
 
-function buildReviewMetadata(
-  changes: MergeRequestChange[],
-  refs: { base: string; head: string },
-): string {
+function buildReviewMetadata(changes: MergeRequestChange[], refs: Refs): string {
   const files = changes.map((change, index) => ({
     index: index + 1,
     old_path: change.old_path,
@@ -244,10 +263,7 @@ function buildReviewMetadata(
   );
 }
 
-function buildTools(refs: {
-  base: string;
-  head: string;
-}): OpenAI.Chat.Completions.ChatCompletionTool[] {
+function buildTools(refs: Refs): ChatCompletionTool[] {
   return [
     {
       type: "function",
@@ -306,11 +322,10 @@ function buildTools(refs: {
 }
 
 export async function handleGetFileTool(
+  ctx: Pick<RunContext, "gitLabProjectApiUrl" | "headers" | "loggers">,
   argsRaw: string,
-  gitLabProjectApiUrl: URL,
-  headers: Record<string, string>,
-  logStep: (message: string) => void,
 ): Promise<string> {
+  const { logStep } = ctx.loggers;
   try {
     const parsed = JSON.parse(argsRaw) as {
       path?: string;
@@ -327,8 +342,8 @@ export async function handleGetFileTool(
       });
     }
     const fileText = await fetchFileAtRef({
-      gitLabProjectApiUrl: gitLabProjectApiUrl,
-      headers,
+      gitLabProjectApiUrl: ctx.gitLabProjectApiUrl,
+      headers: ctx.headers,
       filePath: path,
       ref,
     });
@@ -392,13 +407,9 @@ export async function handleGetFileTool(
   }
 }
 
-async function handleGrepTool(
-  argsRaw: string,
-  refs: { base: string; head: string },
-  gitLabProjectApiUrl: URL,
-  headers: Record<string, string>,
-  logStep: (message: string) => void,
-): Promise<string> {
+async function handleGrepTool(ctx: RunContext, argsRaw: string): Promise<string> {
+  const { refs } = ctx;
+  const { logStep } = ctx.loggers;
   try {
     const parsed = JSON.parse(argsRaw) as { query?: string; ref?: string };
     const query = parsed.query?.trim();
@@ -407,8 +418,8 @@ async function handleGrepTool(
     // GitLab search answers 200 [] for unknown refs, so only the MR's own refs are searched.
     const ref = parsed.ref?.trim() === refs.base ? refs.base : refs.head;
     const results = await searchRepository({
-      gitLabProjectApiUrl: gitLabProjectApiUrl,
-      headers,
+      gitLabProjectApiUrl: ctx.gitLabProjectApiUrl,
+      headers: ctx.headers,
       query,
       ref,
     });
@@ -444,6 +455,100 @@ async function handleGrepTool(
       raw: argsRaw,
     });
   }
+}
+
+async function runTool(ctx: RunContext, name: string, argsRaw: string): Promise<string> {
+  if (name === TOOL_NAME_GET_FILE) return handleGetFileTool(ctx, argsRaw);
+  if (name === TOOL_NAME_GREP) return handleGrepTool(ctx, argsRaw);
+  return JSON.stringify({ ok: false, error: `Unknown tool "${name}"` });
+}
+
+/** Calls the model with the repo tools until it answers without tool calls or
+ *  `maxRounds` runs out, then asks once more with tools off. */
+async function runToolLoop(
+  ctx: RunContext,
+  params: {
+    /** Request label prefix; debug-artifacts-html.ts groups passes by it. */
+    label: string;
+    phase: string;
+    /** Shown in `[tools]` log lines and tool-call debug records. */
+    context?: string;
+    messages: ChatCompletionMessageParam[];
+    maxRounds: number;
+    temperature: number;
+    forceFirstRound: boolean;
+    limitMessage: string;
+    /** When set, every round is logged under this name. */
+    progress?: string;
+  },
+): Promise<ChatCompletion> {
+  const { label, phase, context, maxRounds, temperature, progress } = params;
+  const { logStep, logDebug } = ctx.loggers;
+  const messages = [...params.messages];
+  const tools = buildTools(ctx.refs);
+
+  for (let round = 1; round <= maxRounds; round += 1) {
+    if (progress)
+      logStep(`${progress} round ${round}/${maxRounds}: requesting model response...`);
+    const completion = await complete(ctx, `${label}_round_${round}`, {
+      model: ctx.aiModel,
+      temperature,
+      messages,
+      tools,
+      tool_choice: params.forceFirstRound && round === 1 ? "required" : "auto",
+    });
+    const message = completion.choices[0]?.message;
+    const toolCalls = message?.tool_calls ?? [];
+    logDebug(
+      `${label} round=${round} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
+    );
+    if (progress)
+      logStep(`${progress} round ${round}: model returned ${toolCalls.length} tool call(s).`);
+    if (message == null || toolCalls.length === 0) return completion;
+
+    messages.push({
+      role: "assistant",
+      content: message.content ?? "",
+      tool_calls: toolCalls,
+    });
+    for (const toolCall of toolCalls) {
+      if (toolCall.type !== "function") continue;
+      const name = toolCall.function.name;
+      const argsRaw = toolCall.function.arguments || "{}";
+      logToolUsageMinimal(logStep, name, argsRaw, context);
+      const result = await runTool(ctx, name, argsRaw);
+      messages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+      await record(ctx, {
+        kind: "tool_call",
+        phase,
+        context,
+        round,
+        id: toolCall.id,
+        name,
+        arguments: argsRaw,
+        result,
+      });
+      logDebug(
+        `tool response ${label} id=${toolCall.id} name=${name} payload=${result.slice(0, 300)}`,
+      );
+    }
+  }
+
+  messages.push({ role: "user", content: params.limitMessage });
+  if (progress) logStep(`${progress} tool-call limit reached. Requesting final answer.`);
+  return complete(ctx, `${label}_final_after_tool_limit`, {
+    model: ctx.aiModel,
+    temperature,
+    messages,
+  });
+}
+
+/** Text length of a prompt, the unit --max-total-prompt-chars is measured in. */
+function promptChars(messages: ChatCompletionMessageParam[]): number {
+  return messages.reduce(
+    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+    0,
+  );
 }
 
 async function mapWithConcurrency<T, R>(
@@ -505,514 +610,72 @@ export async function loadReviewInstructions(params: {
   return truncateWithMarker(trimmed, MAX_REVIEW_INSTRUCTIONS_CHARS, "REVIEW.md");
 }
 
-async function reviewMergeRequestWithTools(params: {
-  llm: OpenAI | Anthropic;
-  aiModel: string;
-  promptLimits: PromptLimits;
-  changes: MergeRequestChange[];
-  refs: { base: string; head: string };
-  gitLabProjectApiUrl: URL;
-  headers: Record<string, string>;
-  forceTools: boolean;
-  promptProfile?: PromptProfile;
-  reviewInstructions?: string;
-  loggers: LoggerFns;
-  debugDumpFile?: string;
-  debugRecordWriter?: DebugRecordWriter;
-}): Promise<string> {
-  const {
-    llm,
-    aiModel,
-    promptLimits,
-    changes,
-    refs,
-    gitLabProjectApiUrl,
-    headers,
-    forceTools,
-    promptProfile = DEFAULT_PROMPT_PROFILE,
-    reviewInstructions,
-    loggers,
-    debugDumpFile,
-    debugRecordWriter,
-  } = params;
-  const { logDebug, logStep } = loggers;
-  logStep(
+async function reviewSinglePass(
+  ctx: RunContext,
+  params: {
+    promptLimits: PromptLimits;
+    changes: MergeRequestChange[];
+    promptProfile: PromptProfile;
+  },
+): Promise<string> {
+  const { promptLimits, changes, promptProfile } = params;
+  ctx.loggers.logStep(
     `Single-pass review started for ${changes.length} file(s) (fallback mode).`,
   );
-
-  const messages: ChatCompletionMessageParam[] = withReviewInstructions(
+  const messages = withReviewInstructions(
     buildPrompt({
       changes: changes.map((change) => ({ path: change.new_path, diff: change.diff })),
       limits: promptLimits,
       allowTools: true,
       profile: promptProfile,
     }),
-    reviewInstructions,
+    ctx.reviewInstructions,
   );
   messages.push({
     role: "user",
-    content: `Merge request metadata:\n${buildReviewMetadata(changes, refs)}`,
+    content: `Merge request metadata:\n${buildReviewMetadata(changes, ctx.refs)}`,
   });
-
-  const tools = buildTools(refs);
-
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    logStep(
-      `Single-pass round ${round + 1}/${MAX_TOOL_ROUNDS}: requesting model response...`,
-    );
-    const completion = await createCompletionWithDebug({
-      llm,
-      requestLabel: `main_review_round_${round + 1}`,
-      debugDumpFile,
-      debugRecordWriter,
-      request: {
-        model: aiModel,
-        temperature: 0.2,
-        stream: false,
-        messages,
-        tools,
-        tool_choice: forceTools && round === 0 ? "required" : "auto",
-      },
-    });
-    const message = completion.choices[0]?.message;
-    if (message == null) return buildAnswer(completion);
-
-    const toolCalls = message.tool_calls ?? [];
-    logDebug(
-      `main-review round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
-    );
-    logStep(
-      `Single-pass round ${round + 1}: model returned ${toolCalls.length} tool call(s).`,
-    );
-    if (toolCalls.length === 0) return buildAnswer(completion);
-
-    messages.push({
-      role: "assistant",
-      content: message.content ?? "",
-      tool_calls: toolCalls,
-    });
-
-    for (const toolCall of toolCalls) {
-      if (toolCall.type !== "function") continue;
-      const toolName = toolCall.function.name;
-      const argsRaw = toolCall.function.arguments ?? "{}";
-      await appendDebugDump(debugDumpFile, debugRecordWriter, {
-        kind: "tool_call",
-        phase: "main_review",
-        round: round + 1,
-        id: toolCall.id,
-        name: toolName,
-        arguments: argsRaw,
-      });
-      logToolUsageMinimal(logStep, toolName, argsRaw);
-      let toolContent: string;
-      if (toolName === TOOL_NAME_GET_FILE) {
-        toolContent = await handleGetFileTool(
-          argsRaw,
-          gitLabProjectApiUrl,
-          headers,
-          logStep,
-        );
-      } else if (toolName === TOOL_NAME_GREP) {
-        toolContent = await handleGrepTool(
-          argsRaw,
-          refs,
-          gitLabProjectApiUrl,
-          headers,
-          logStep,
-        );
-      } else {
-        toolContent = JSON.stringify({
-          ok: false,
-          error: `Unknown tool "${toolName}"`,
-        });
-      }
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: toolContent,
-      });
-      await appendDebugDump(debugDumpFile, debugRecordWriter, {
-        kind: "tool_response",
-        phase: "main_review",
-        round: round + 1,
-        id: toolCall.id,
-        name: toolName,
-        content: toolContent,
-      });
-      logDebug(
-        `tool response id=${toolCall.id} name=${toolName} payload=${toolContent.slice(0, 300)}`,
-      );
-    }
-  }
-
-  messages.push({
-    role: "user",
-    content: `Tool-call limit reached (${MAX_TOOL_ROUNDS}). Do not call any tools. Provide your best-effort final review now, strictly following the required output format. If confidence is low, return the exact no-issues sentence.`,
+  const completion = await runToolLoop(ctx, {
+    label: "main_review",
+    phase: "main_review",
+    messages,
+    maxRounds: MAX_TOOL_ROUNDS,
+    temperature: 0.2,
+    forceFirstRound: ctx.forceTools,
+    limitMessage: `Tool-call limit reached (${MAX_TOOL_ROUNDS}). Do not call any tools. Provide your best-effort final review now, strictly following the required output format. If confidence is low, return the exact no-issues sentence.`,
+    progress: "Single-pass",
   });
-  logStep("Single-pass tool-call limit reached. Requesting final answer.");
-  const finalCompletion = await createCompletionWithDebug({
-    llm,
-    requestLabel: "main_review_final_after_tool_limit",
-    debugDumpFile,
-    debugRecordWriter,
-    request: {
-      model: aiModel,
-      temperature: 0.2,
-      stream: false,
-      messages,
-    },
-  });
-  return buildAnswer(finalCompletion);
+  return buildAnswer(completion);
 }
 
-async function runFileReviewWithTools(params: {
-  llm: OpenAI | Anthropic;
-  aiModel: string;
-  filePath: string;
-  fileDiff: string;
-  summary: string;
-  otherChangedFiles: string[];
-  refs: { base: string; head: string };
-  gitLabProjectApiUrl: URL;
-  headers: Record<string, string>;
-  forceTools: boolean;
-  promptProfile: PromptProfile;
-  reviewInstructions?: string;
-  loggers: LoggerFns;
-  debugDumpFile?: string;
-  debugRecordWriter?: DebugRecordWriter;
-}): Promise<string> {
+export async function reviewMergeRequestMultiPass(
+  params: RunContext & {
+    promptLimits: PromptLimits;
+    triageDiffChars: number;
+    changes: MergeRequestChange[];
+    maxFindings: number;
+    reviewConcurrency: number;
+    promptProfile?: PromptProfile;
+    /** When AI_PROMPT_PROFILE is not set explicitly, a triage JSON parse failure
+     *  demotes the whole run to the "weak" profile (behavioral capability probe). */
+    allowProfileAutoDemote?: boolean;
+  },
+): Promise<string> {
+  const ctx: RunContext = params;
   const {
-    llm,
-    aiModel,
-    filePath,
-    fileDiff,
-    summary,
-    otherChangedFiles,
-    refs,
-    gitLabProjectApiUrl,
-    headers,
-    forceTools,
-    promptProfile,
-    reviewInstructions,
-    loggers,
-    debugDumpFile,
-    debugRecordWriter,
-  } = params;
-  const { logDebug, logStep } = loggers;
-
-  const messages: ChatCompletionMessageParam[] = withReviewInstructions(
-    buildFileReviewPrompt({
-      filePath,
-      fileDiff,
-      summary,
-      otherChangedFiles,
-      allowTools: true,
-      profile: promptProfile,
-    }),
-    reviewInstructions,
-  );
-
-  const tools = buildTools(refs);
-
-  for (let round = 0; round < MAX_FILE_TOOL_ROUNDS; round += 1) {
-    const completion = await createCompletionWithDebug({
-      llm,
-      requestLabel: `file_review_${filePath}_round_${round + 1}`,
-      debugDumpFile,
-      debugRecordWriter,
-      request: {
-        model: aiModel,
-        temperature: 0.2,
-        stream: false,
-        messages,
-        tools,
-        tool_choice: forceTools && round === 0 ? "required" : "auto",
-      },
-    });
-    const msg = completion.choices[0]?.message;
-    if (msg == null)
-      return extractCompletionText(completion) ?? NO_FINDINGS_SENTENCE;
-
-    const toolCalls = msg.tool_calls ?? [];
-    logDebug(
-      `file-review path=${filePath} round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
-    );
-    if (toolCalls.length === 0)
-      return extractCompletionText(completion) ?? NO_FINDINGS_SENTENCE;
-
-    messages.push({
-      role: "assistant",
-      content: msg.content ?? "",
-      tool_calls: toolCalls,
-    });
-
-    for (const toolCall of toolCalls) {
-      if (toolCall.type !== "function") continue;
-      const toolName = toolCall.function.name;
-      const argsRaw = toolCall.function.arguments ?? "{}";
-      await appendDebugDump(debugDumpFile, debugRecordWriter, {
-        kind: "tool_call",
-        phase: "file_review",
-        filePath,
-        round: round + 1,
-        id: toolCall.id,
-        name: toolName,
-        arguments: argsRaw,
-      });
-      logToolUsageMinimal(logStep, toolName, argsRaw, filePath);
-      let toolContent: string;
-      if (toolName === TOOL_NAME_GET_FILE) {
-        toolContent = await handleGetFileTool(
-          argsRaw,
-          gitLabProjectApiUrl,
-          headers,
-          logStep,
-        );
-      } else if (toolName === TOOL_NAME_GREP) {
-        toolContent = await handleGrepTool(
-          argsRaw,
-          refs,
-          gitLabProjectApiUrl,
-          headers,
-          logStep,
-        );
-      } else {
-        toolContent = JSON.stringify({
-          ok: false,
-          error: `Unknown tool "${toolName}"`,
-        });
-      }
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: toolContent,
-      });
-      await appendDebugDump(debugDumpFile, debugRecordWriter, {
-        kind: "tool_response",
-        phase: "file_review",
-        filePath,
-        round: round + 1,
-        id: toolCall.id,
-        name: toolName,
-        content: toolContent,
-      });
-      logDebug(
-        `tool response file=${filePath} id=${toolCall.id} name=${toolName} payload=${toolContent.slice(0, 300)}`,
-      );
-    }
-  }
-
-  messages.push({
-    role: "user",
-    content:
-      "Tool-call limit reached. Provide your final review now without any tool calls.",
-  });
-  const final = await createCompletionWithDebug({
-    llm,
-    requestLabel: `file_review_${filePath}_final_after_tool_limit`,
-    debugDumpFile,
-    debugRecordWriter,
-    request: {
-      model: aiModel,
-      temperature: 0.2,
-      stream: false,
-      messages,
-    },
-  });
-  return extractCompletionText(final) ?? NO_FINDINGS_SENTENCE;
-}
-
-function draftHasStructuredFindings(consolidatedText: string): boolean {
-  return /-\s*\[(?:high|medium)\]/i.test(consolidatedText);
-}
-
-async function runVerificationWithTools(params: {
-  llm: OpenAI | Anthropic;
-  aiModel: string;
-  baseMessages: ChatCompletionMessageParam[];
-  refs: { base: string; head: string };
-  gitLabProjectApiUrl: URL;
-  headers: Record<string, string>;
-  forceTools: boolean;
-  consolidatedDraft: string;
-  loggers: LoggerFns;
-  debugDumpFile?: string;
-  debugRecordWriter?: DebugRecordWriter;
-}): Promise<any> {
-  const {
-    llm,
-    aiModel,
-    baseMessages,
-    refs,
-    gitLabProjectApiUrl,
-    headers,
-    forceTools,
-    consolidatedDraft,
-    loggers,
-    debugDumpFile,
-    debugRecordWriter,
-  } = params;
-  const { logDebug, logStep } = loggers;
-
-  const messages: ChatCompletionMessageParam[] = [...baseMessages];
-
-  const tools = buildTools(refs);
-
-  const verificationForceRound0 =
-    forceTools && draftHasStructuredFindings(consolidatedDraft);
-
-  for (let round = 0; round < MAX_VERIFICATION_TOOL_ROUNDS; round += 1) {
-    const completion = await createCompletionWithDebug({
-      llm,
-      requestLabel: `verification_pass_round_${round + 1}`,
-      debugDumpFile,
-      debugRecordWriter,
-      request: {
-        model: aiModel,
-        temperature: 0,
-        stream: false,
-        messages,
-        tools,
-        tool_choice: verificationForceRound0 && round === 0 ? "required" : "auto",
-      },
-    });
-    const message = completion.choices[0]?.message;
-    if (message == null) return completion;
-
-    const toolCalls = message.tool_calls ?? [];
-    logDebug(
-      `verification round=${round + 1} tool_calls=${toolCalls.length} finish_reason=${completion.choices[0]?.finish_reason ?? "unknown"}`,
-    );
-    if (toolCalls.length === 0) return completion;
-
-    messages.push({
-      role: "assistant",
-      content: message.content ?? "",
-      tool_calls: toolCalls,
-    });
-
-    for (const toolCall of toolCalls) {
-      if (toolCall.type !== "function") continue;
-      const toolName = toolCall.function.name;
-      const argsRaw = toolCall.function.arguments ?? "{}";
-      await appendDebugDump(debugDumpFile, debugRecordWriter, {
-        kind: "tool_call",
-        phase: "verification",
-        round: round + 1,
-        id: toolCall.id,
-        name: toolName,
-        arguments: argsRaw,
-      });
-      logToolUsageMinimal(logStep, toolName, argsRaw, "(verify)");
-      let toolContent: string;
-      if (toolName === TOOL_NAME_GET_FILE) {
-        toolContent = await handleGetFileTool(
-          argsRaw,
-          gitLabProjectApiUrl,
-          headers,
-          logStep,
-        );
-      } else if (toolName === TOOL_NAME_GREP) {
-        toolContent = await handleGrepTool(
-          argsRaw,
-          refs,
-          gitLabProjectApiUrl,
-          headers,
-          logStep,
-        );
-      } else {
-        toolContent = JSON.stringify({
-          ok: false,
-          error: `Unknown tool "${toolName}"`,
-        });
-      }
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: toolContent,
-      });
-      await appendDebugDump(debugDumpFile, debugRecordWriter, {
-        kind: "tool_response",
-        phase: "verification",
-        round: round + 1,
-        id: toolCall.id,
-        name: toolName,
-        content: toolContent,
-      });
-      logDebug(
-        `verification tool id=${toolCall.id} name=${toolName} payload=${toolContent.slice(0, 300)}`,
-      );
-    }
-  }
-
-  messages.push({
-    role: "user",
-    content: `Tool-call limit reached (${MAX_VERIFICATION_TOOL_ROUNDS}). Do not call tools. Output only the verified findings in the required format.`,
-  });
-  return createCompletionWithDebug({
-    llm,
-    requestLabel: "verification_pass_final_after_tool_limit",
-    debugDumpFile,
-    debugRecordWriter,
-    request: {
-      model: aiModel,
-      temperature: 0,
-      stream: false,
-      messages,
-    },
-  });
-}
-
-export async function reviewMergeRequestMultiPass(params: {
-  llm: OpenAI | Anthropic;
-  aiModel: string;
-  promptLimits: PromptLimits;
-  triageDiffChars: number;
-  changes: MergeRequestChange[];
-  refs: { base: string; head: string };
-  gitLabProjectApiUrl: URL;
-  headers: Record<string, string>;
-  maxFindings: number;
-  reviewConcurrency: number;
-  forceTools: boolean;
-  promptProfile?: PromptProfile;
-  /** When AI_PROMPT_PROFILE is not set explicitly, a triage JSON parse failure
-   *  demotes the whole run to the "weak" profile (behavioral capability probe). */
-  allowProfileAutoDemote?: boolean;
-  /** Repository REVIEW.md (see loadReviewInstructions), appended to every pass. */
-  reviewInstructions?: string;
-  loggers: LoggerFns;
-  debugDumpFile?: string;
-  debugRecordWriter?: DebugRecordWriter;
-}): Promise<string> {
-  const {
-    llm,
     aiModel,
     promptLimits,
     triageDiffChars,
     changes,
-    refs,
-    gitLabProjectApiUrl,
-    headers,
     maxFindings,
     reviewConcurrency,
-    forceTools,
     promptProfile = DEFAULT_PROMPT_PROFILE,
     allowProfileAutoDemote = false,
     reviewInstructions,
-    loggers,
-    debugDumpFile,
-    debugRecordWriter,
   } = params;
-  const { logStep } = loggers;
+  const { logStep } = params.loggers;
   let effectiveProfile: PromptProfile = promptProfile;
 
-  logStep(
-    `Pass 1/4: triaging ${changes.length} file(s) ` +
-      `(prompt profile=${promptProfile}, triage_diff_chars=${triageDiffChars})`,
-  );
   const triageInputs: TriageFileInput[] = changes.map((c) => ({
     path: c.new_path,
     new_file: c.new_file,
@@ -1020,35 +683,51 @@ export async function reviewMergeRequestMultiPass(params: {
     renamed_file: c.renamed_file,
     diff: c.diff,
   }));
-  const triageMessages = withReviewInstructions(
-    buildTriagePrompt(triageInputs, promptProfile, triageDiffChars),
-    reviewInstructions,
+  const triagePrompt = (profile: PromptProfile, diffChars: number) =>
+    withReviewInstructions(
+      buildTriagePrompt(triageInputs, profile, diffChars),
+      reviewInstructions,
+    );
+  // Triage sees every file in one call, so a large MR must still fit in
+  // --max-total-prompt-chars instead of failing into the single-pass fallback.
+  // The prompt with every diff cut to nothing is the fixed cost (system prompt,
+  // REVIEW.md, per-file headers and truncation markers); what is left is split
+  // evenly across the diffs.
+  const triageCharsFor = (profile: PromptProfile): number => {
+    const overhead = promptChars(triagePrompt(profile, 0));
+    const perFile = Math.floor(
+      (promptLimits.maxTotalPromptChars - overhead) / changes.length,
+    );
+    return Math.max(0, Math.min(triageDiffChars, perFile));
+  };
+  const triageChars = triageCharsFor(promptProfile);
+  logStep(
+    `Pass 1/4: triaging ${changes.length} file(s) ` +
+      `(prompt profile=${promptProfile}, triage_diff_chars=${triageChars}` +
+      `${triageChars < triageDiffChars ? ", capped by --max-total-prompt-chars" : ""})`,
   );
-  let triageResult: ReturnType<typeof parseTriageResponse> = null;
-  let triageText: string | null = null;
-  let triageParseReason: TriageParseFailureReason | null = null;
-  let triageParseError: string | null = null;
-  try {
-    const triageCompletion = await createCompletionWithDebug({
-      llm,
-      requestLabel: "triage_pass",
-      debugDumpFile,
-      debugRecordWriter,
-      request: {
-        model: aiModel,
-        temperature: 0.1,
-        stream: false,
-        messages: triageMessages,
-        response_format: { type: "json_object" },
-      },
+  if (triageChars === 0) {
+    logStep(
+      "Warning: the file list alone fills --max-total-prompt-chars; triage sees file names and sizes only. Raise the flag for a better triage.",
+    );
+  }
+  const triage = async (profile: PromptProfile, label: string) => {
+    const completion = await complete(ctx, label, {
+      model: aiModel,
+      temperature: 0.1,
+      messages: triagePrompt(profile, triageCharsFor(profile)),
+      response_format: { type: "json_object" },
     });
-    triageText = extractCompletionText(triageCompletion);
-    if (triageText != null) {
-      const triageParse = parseTriageResponseDetailed(triageText);
-      triageResult = triageParse.result;
-      triageParseReason = triageParse.reason;
-      triageParseError = triageParse.parseError;
-    }
+    const text = extractCompletionText(completion);
+    return { text, parse: text == null ? null : parseTriageResponseDetailed(text) };
+  };
+
+  let triageResult: TriageResult | null = null;
+  let triageText: string | null = null;
+  let triageParse: ReturnType<typeof parseTriageResponseDetailed> | null = null;
+  try {
+    ({ text: triageText, parse: triageParse } = await triage(promptProfile, "triage_pass"));
+    triageResult = triageParse?.result ?? null;
   } catch (error: any) {
     logStep(
       `Triage pass failed: ${error?.message ?? error}. Falling back to single-pass.`,
@@ -1070,33 +749,17 @@ export async function reviewMergeRequestMultiPass(params: {
       "Triage response unparseable with prompt profile=default. Retrying triage with profile=weak.",
     );
     try {
-      const weakTriageCompletion = await createCompletionWithDebug({
-        llm,
-        requestLabel: "triage_pass_weak_retry",
-        debugDumpFile,
-        debugRecordWriter,
-        request: {
-          model: aiModel,
-          temperature: 0.1,
-          stream: false,
-          messages: withReviewInstructions(
-            buildTriagePrompt(triageInputs, "weak", triageDiffChars),
-            reviewInstructions,
-          ),
-          response_format: { type: "json_object" },
-        },
-      });
-      const weakTriageText = extractCompletionText(weakTriageCompletion);
-      const weakParse =
-        weakTriageText != null
-          ? parseTriageResponseDetailed(weakTriageText)
-          : null;
-      if (weakParse?.result != null) {
-        triageResult = weakParse.result;
+      const weak = await triage("weak", "triage_pass_weak_retry");
+      if (weak.parse?.result != null) {
+        triageResult = weak.parse.result;
         effectiveProfile = "weak";
         logStep(
           "Weak-profile triage parsed successfully. Continuing all passes with prompt profile=weak.",
         );
+      } else {
+        // The failure report below describes the last attempt, this one.
+        triageText = weak.text;
+        triageParse = weak.parse;
       }
     } catch (error: any) {
       logStep(`Weak-profile triage retry failed: ${error?.message ?? error}.`);
@@ -1106,34 +769,19 @@ export async function reviewMergeRequestMultiPass(params: {
   if (triageResult == null) {
     if (triageText != null) {
       const triagePreview = triageText.replace(/\s+/g, " ").trim().slice(0, 200);
-      const looksLikeHtml = /<html|<!doctype html/i.test(triageText);
-      const parseReasonText =
-        triageParseReason != null
-          ? `reason=${triageParseReason}`
-          : `reason=${looksLikeHtml ? "html_response" : "unknown_non_json"}`;
       const parseErrorText =
-        triageParseError != null ? ` parse_error=${triageParseError}` : "";
+        triageParse?.parseError != null ? ` parse_error=${triageParse.parseError}` : "";
       logStep(
-        `Triage parse failed: ${parseReasonText}.${parseErrorText} Preview: ${triagePreview || "<empty>"}`,
+        `Triage parse failed: reason=${triageParse?.reason}.${parseErrorText} Preview: ${triagePreview || "<empty>"}`,
       );
     } else {
       logStep("Triage parse failed: model returned empty response body.");
     }
     logStep("Falling back to single-pass pipeline.");
-    return await reviewMergeRequestWithTools({
-      llm,
-      aiModel,
+    return reviewSinglePass(ctx, {
       promptLimits,
       changes,
-      refs,
-      gitLabProjectApiUrl,
-      headers,
-      forceTools,
       promptProfile: effectiveProfile,
-      reviewInstructions,
-      loggers,
-      debugDumpFile,
-      debugRecordWriter,
     });
   }
 
@@ -1143,11 +791,11 @@ export async function reviewMergeRequestMultiPass(params: {
   });
   const skippedCount = decisions.filter((d) => d.review_action === "skipped").length;
 
-  await appendDebugDump(debugDumpFile, debugRecordWriter, {
+  await record(ctx, {
     kind: "triage_decision",
     summary: triageResult.summary,
     skip_all_override: skipAllOverride,
-    triage_diff_chars: triageDiffChars,
+    triage_diff_chars: triageCharsFor(effectiveProfile),
     files: decisions,
   });
 
@@ -1168,49 +816,49 @@ export async function reviewMergeRequestMultiPass(params: {
   logStep(
     `Pass 2/4: reviewing ${reviewFiles.length} file(s) (concurrency=${reviewConcurrency})`,
   );
+  const summary = triageResult.summary;
   const allChangedPaths = changes.map((c) => c.new_path);
   const failedPaths: string[] = [];
   const perFileFindings = await mapWithConcurrency(
     reviewFiles,
     reviewConcurrency,
     async (change) => {
-      const otherFiles = allChangedPaths.filter((p) => p !== change.new_path);
+      const path = change.new_path;
       let findings: string;
       try {
-        findings = await runFileReviewWithTools({
-          llm,
-          aiModel,
-          filePath: change.new_path,
-          fileDiff: truncateWithMarker(
-            change.diff,
-            promptLimits.maxDiffChars,
-            change.new_path,
+        const completion = await runToolLoop(ctx, {
+          label: `file_review_${path}`,
+          phase: "file_review",
+          context: path,
+          messages: withReviewInstructions(
+            buildFileReviewPrompt({
+              filePath: path,
+              fileDiff: truncateWithMarker(change.diff, promptLimits.maxDiffChars, path),
+              summary,
+              otherChangedFiles: allChangedPaths.filter((p) => p !== path),
+              allowTools: true,
+              profile: effectiveProfile,
+            }),
+            reviewInstructions,
           ),
-          summary: triageResult!.summary,
-          otherChangedFiles: otherFiles,
-          refs,
-          gitLabProjectApiUrl,
-          headers,
-          forceTools,
-          promptProfile: effectiveProfile,
-          reviewInstructions,
-          loggers,
-          debugDumpFile,
-          debugRecordWriter,
+          maxRounds: MAX_FILE_TOOL_ROUNDS,
+          temperature: 0.2,
+          forceFirstRound: ctx.forceTools,
+          limitMessage:
+            "Tool-call limit reached. Provide your final review now without any tool calls.",
         });
+        findings = extractCompletionText(completion) ?? NO_FINDINGS_SENTENCE;
       } catch (error: any) {
         const preview = String(error?.message ?? error)
           .replace(/\s+/g, " ")
           .slice(0, 200);
         logStep(
-          `Pass 2: review failed for ${change.new_path}: ${preview}. Continuing with remaining files.`,
+          `Pass 2: review failed for ${path}: ${preview}. Continuing with remaining files.`,
         );
-        failedPaths.push(change.new_path);
-        // ponytail: failed file surfaces as "no findings" in the MR comment;
-        // thread failedPaths into the consolidate prompt if that ever matters.
+        failedPaths.push(path);
         findings = NO_FINDINGS_SENTENCE;
       }
-      return { path: change.new_path, findings };
+      return { path, findings };
     },
   );
   if (failedPaths.length === reviewFiles.length) {
@@ -1218,12 +866,6 @@ export async function reviewMergeRequestMultiPass(params: {
       `All ${reviewFiles.length} per-file reviews failed (e.g. ${failedPaths[0]}). See log above.`,
     );
   }
-
-  // Deterministic note header: title + triage summary. Prepended in code so
-  // every final-answer path gets it regardless of model formatting discipline.
-  const summaryText = triageResult.summary.trim().replace(/\s*\n\s*/g, " ");
-  const withHeader = (body: string): string =>
-    `### 🤖 AI Code Review\n\n${summaryText === "" ? "" : `> ${summaryText}\n\n`}${body}`;
 
   // Cap transparency: if consolidation likely trimmed the list (final count hit
   // the cap while per-file review produced more candidates), say so in the note
@@ -1237,77 +879,44 @@ export async function reviewMergeRequestMultiPass(params: {
       ),
     ),
   ).size;
-  const withCapNote = (body: string): string => {
-    const finalCount = parseReviewFindings(body).length;
-    if (finalCount < maxFindings || candidateCount <= finalCount) return body;
-    const note = `\n\nℹ️ Showing top ${finalCount} of ${candidateCount} candidate findings (\`--max-findings=${maxFindings}\`). Run with \`--include-artifacts\` for the full list.`;
-    const disclaimerAt = body.lastIndexOf("\n\n---\n_");
-    return disclaimerAt === -1
-      ? body + note
-      : body.slice(0, disclaimerAt) + note + body.slice(disclaimerAt);
+  // Deterministic note header (title + triage summary) and footnotes, added in
+  // code so every final-answer path gets them regardless of model formatting.
+  const summaryText = summary.trim().replace(/\s*\n\s*/g, " ");
+  const finish = (body: string): string => {
+    let out = body;
+    const finalCount = parseReviewFindings(out).length;
+    if (finalCount >= maxFindings && candidateCount > finalCount) {
+      out = insertBeforeDisclaimer(
+        out,
+        `ℹ️ Showing top ${finalCount} of ${candidateCount} candidate findings (\`--max-findings=${maxFindings}\`). Run with \`--include-artifacts\` for the full list.`,
+      );
+    }
+    if (failedPaths.length > 0) {
+      out = insertBeforeDisclaimer(
+        out,
+        `${NOT_REVIEWED_NOTE} ${failedPaths.map((p) => `\`${p}\``).join(", ")}.`,
+      );
+    }
+    return `### 🤖 AI Code Review\n\n${summaryText === "" ? "" : `> ${summaryText}\n\n`}${out}`;
   };
 
   logStep("Pass 3/4: consolidating findings");
   const consolidateMessages = buildConsolidatePrompt({
     perFileFindings,
-    summary: triageResult.summary,
+    summary,
     maxFindings,
     profile: effectiveProfile,
   });
   if (consolidateMessages == null) {
-    return withHeader(`${NO_FINDINGS_SENTENCE}\n\n---\n_${DISCLAIMER}_`);
+    return finish(`${NO_FINDINGS_SENTENCE}\n\n---\n_${DISCLAIMER}_`);
   }
+  let consolidateCompletion: ChatCompletion;
   try {
-    const consolidateCompletion = await createCompletionWithDebug({
-      llm,
-      requestLabel: "consolidate_pass",
-      debugDumpFile,
-      debugRecordWriter,
-      request: {
-        model: aiModel,
-        temperature: 0.1,
-        stream: false,
-        messages: withReviewInstructions(consolidateMessages, reviewInstructions),
-      },
+    consolidateCompletion = await complete(ctx, "consolidate_pass", {
+      model: aiModel,
+      temperature: 0.1,
+      messages: withReviewInstructions(consolidateMessages, reviewInstructions),
     });
-    const consolidatedText = extractCompletionText(consolidateCompletion);
-    if (consolidatedText == null || consolidatedText.trim() === "") {
-      return withHeader(withCapNote(buildAnswer(consolidateCompletion)));
-    }
-
-    logStep("Pass 4/4: verifying consolidated findings (repo tools)");
-    const verificationMessages = withReviewInstructions(
-      buildVerificationPrompt({
-        perFileFindings,
-        summary: triageResult.summary,
-        consolidatedFindings: consolidatedText,
-        maxFindings,
-        refs,
-        profile: effectiveProfile,
-      }),
-      reviewInstructions,
-    );
-    try {
-      const verificationCompletion = await runVerificationWithTools({
-        llm,
-        aiModel,
-        baseMessages: verificationMessages,
-        refs,
-        gitLabProjectApiUrl,
-        headers,
-        forceTools,
-        consolidatedDraft: consolidatedText,
-        loggers,
-        debugDumpFile,
-        debugRecordWriter,
-      });
-      return withHeader(withCapNote(buildAnswer(verificationCompletion)));
-    } catch (error: any) {
-      logStep(
-        `Verification failed: ${error?.message ?? error}. Returning consolidated findings.`,
-      );
-      return withHeader(withCapNote(buildAnswer(consolidateCompletion)));
-    }
   } catch (error: any) {
     logStep(
       `Consolidation failed: ${error?.message ?? error}. Returning raw per-file findings.`,
@@ -1316,6 +925,40 @@ export async function reviewMergeRequestMultiPass(params: {
       .filter((f) => !isEmptyReviewBody(f.findings))
       .map((f) => f.findings)
       .join("\n");
-    return withHeader(`${raw || NO_FINDINGS_SENTENCE}\n\n---\n_${DISCLAIMER}_`);
+    return finish(`${raw || NO_FINDINGS_SENTENCE}\n\n---\n_${DISCLAIMER}_`);
+  }
+  const consolidatedText = extractCompletionText(consolidateCompletion);
+  if (consolidatedText == null) return finish(buildAnswer(consolidateCompletion));
+
+  logStep("Pass 4/4: verifying consolidated findings (repo tools)");
+  try {
+    const verificationCompletion = await runToolLoop(ctx, {
+      label: "verification_pass",
+      phase: "verification",
+      context: "(verify)",
+      messages: withReviewInstructions(
+        buildVerificationPrompt({
+          perFileFindings,
+          summary,
+          consolidatedFindings: consolidatedText,
+          maxFindings,
+          refs: ctx.refs,
+          profile: effectiveProfile,
+        }),
+        reviewInstructions,
+      ),
+      maxRounds: MAX_VERIFICATION_TOOL_ROUNDS,
+      temperature: 0,
+      // Forcing a tool call only makes sense when there is a finding to check.
+      forceFirstRound:
+        ctx.forceTools && /-\s*\[(?:high|medium)\]/i.test(consolidatedText),
+      limitMessage: `Tool-call limit reached (${MAX_VERIFICATION_TOOL_ROUNDS}). Do not call tools. Output only the verified findings in the required format.`,
+    });
+    return finish(buildAnswer(verificationCompletion));
+  } catch (error: any) {
+    logStep(
+      `Verification failed: ${error?.message ?? error}. Returning consolidated findings.`,
+    );
+    return finish(buildAnswer(consolidateCompletion));
   }
 }
