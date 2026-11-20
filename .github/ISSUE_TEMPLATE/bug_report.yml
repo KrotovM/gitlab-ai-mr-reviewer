@@ -1,0 +1,70 @@
+name: Bug report
+description: The review job fails or posts a wrong result
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove tokens, API keys and private code from everything you paste. Security issues go to [private reporting](https://github.com/KrotovM/gitlab-ai-mr-reviewer/security/advisories/new), not here.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The job log prints it at the top, `gitlab-ai-review vX.Y.Z`.
+      placeholder: 1.0.47
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run it
+      options:
+        - GitLab CI/CD catalog component
+        - npx in .gitlab-ci.yml
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - OpenAI
+        - OpenAI-compatible (OPENAI_BASE_URL)
+        - Anthropic
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The value of `AI_MODEL`, or "default".
+      placeholder: gpt-4o-mini
+  - type: dropdown
+    id: gitlab
+    attributes:
+      label: GitLab
+      options:
+        - GitLab.com
+        - Self-managed
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected instead, and what in the MR triggers it if you know.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Job config
+      description: The review job from `.gitlab-ci.yml` or the component inputs, with flags.
+      render: yaml
+  - type: textarea
+    id: log
+    attributes:
+      label: Job log
+      description: Run with `--debug` for full error details. Attach the `--include-artifacts` HTML report if you can.
+      render: text
