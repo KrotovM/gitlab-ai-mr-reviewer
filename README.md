@@ -9,6 +9,8 @@
 
 Gitlab AI Code Review is a CLI tool that leverages OpenAI or Anthropic (Claude) models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
 
+> **Benchmark:** on an AI-generated merge request (36 files, 5 seeded defects, three of them contradicting the MR description), gitlab-ai-review v1.0.49 found **5/5 with zero noise** on gpt-5.4, Claude Opus 5.5 and a self-hosted model; OpenCodeReview found 2–4/5 with 3–12 extra comments. [Details and methodology](#benchmark)
+
 ![AI review comment posted on a GitLab merge request](docs/review.png)
 
 ## Features
