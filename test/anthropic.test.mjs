@@ -113,6 +113,9 @@ test("anthropic: tool round replays Claude's turn verbatim and keeps tools for t
   assert.deepEqual(round2.tool_choice, { type: "none" });
   assert.equal(final.choices[0].message.content, "LGTM");
   assert.equal(final.usage.prompt_tokens, 110);
+  // The debug report reads the raw cache fields from the returned usage.
+  assert.equal(final.usage.cache_read_input_tokens, 100);
+  assert.equal(final.usage.cache_creation_input_tokens, 0);
 });
 
 test("anthropic: a refusal throws so the pass falls back instead of posting an empty review", async () => {

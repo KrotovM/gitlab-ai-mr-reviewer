@@ -130,7 +130,7 @@ export async function createAnthropicCompletion(
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: response.model,
-    // Raw fields stay too, so debug artifacts show cache reads.
+    // Raw fields stay too, so debug artifacts show cache reads and writes.
     usage: {
       ...usage,
       prompt_tokens: promptTokens,

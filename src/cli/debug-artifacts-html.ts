@@ -35,33 +35,51 @@ export async function renderDebugArtifactsHtml(params: {
       requestTsByLabel.set(request.label, String(request.ts ?? ""));
   }
 
-  type Usage = { prompt: number; completion: number; total: number };
+  type Usage = {
+    prompt: number;
+    cacheRead: number;
+    cacheWrite: number;
+    completion: number;
+    total: number;
+  };
+  // prompt_tokens includes cached input for both providers; the cache counts are
+  // parts of it. Anthropic usage keeps its raw cache fields (see anthropic.ts),
+  // OpenAI reports reads only, in prompt_tokens_details.
   function usageOf(record: Record<string, any> | undefined): Usage | null {
     const u = record?.response?.usage;
     if (u == null) return null;
     return {
       prompt: Number(u.prompt_tokens ?? 0),
+      cacheRead: Number(
+        u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0,
+      ),
+      cacheWrite: Number(u.cache_creation_input_tokens ?? 0),
       completion: Number(u.completion_tokens ?? 0),
       total: Number(u.total_tokens ?? 0),
     };
   }
   function sumUsage(labels: string[]): { usage: Usage; reported: number } {
-    const usage: Usage = { prompt: 0, completion: 0, total: 0 };
+    const usage: Usage = {
+      prompt: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      completion: 0,
+      total: 0,
+    };
     let reported = 0;
     for (const label of labels) {
       const u = usageOf(byLabel.get(label));
       if (u == null) continue;
       reported += 1;
-      usage.prompt += u.prompt;
-      usage.completion += u.completion;
-      usage.total += u.total;
+      for (const key of Object.keys(usage) as (keyof Usage)[])
+        usage[key] += u[key];
     }
     return { usage, reported };
   }
   function tokensText(labels: string[]): string {
     const { usage, reported } = sumUsage(labels);
     if (reported === 0) return "tokens: not reported by backend";
-    return `prompt: ${usage.prompt.toLocaleString()} • completion: ${usage.completion.toLocaleString()} • total: ${usage.total.toLocaleString()}`;
+    return `prompt: ${usage.prompt.toLocaleString()} • cache read: ${usage.cacheRead.toLocaleString()} • cache write: ${usage.cacheWrite.toLocaleString()} • completion: ${usage.completion.toLocaleString()} • total: ${usage.total.toLocaleString()}`;
   }
   function parseTs(value: unknown): number | null {
     const ms = Date.parse(String(value ?? ""));
@@ -248,9 +266,14 @@ export async function renderDebugArtifactsHtml(params: {
     `<td style="padding:6px 8px;border-bottom:1px solid var(--line);${opts?.strong ? "font-weight:700;" : ""}">${value}</td>`;
   const usageCells = (labels: string[], strong?: boolean): string => {
     const { usage, reported } = sumUsage(labels);
-    if (reported === 0)
-      return `${cell("n/a", { strong })}${cell("n/a", { strong })}${cell("n/a", { strong })}`;
-    return [usage.prompt, usage.completion, usage.total]
+    if (reported === 0) return cell("n/a", { strong }).repeat(5);
+    return [
+      usage.prompt,
+      usage.cacheRead,
+      usage.cacheWrite,
+      usage.completion,
+      usage.total,
+    ]
       .map((n) => cell(escapeHtml(n.toLocaleString()), { strong }))
       .join("");
   };
@@ -265,6 +288,10 @@ export async function renderDebugArtifactsHtml(params: {
   const totalUsage = sumUsage(allLabels);
   const totalTokensText =
     totalUsage.reported === 0 ? "n/a" : totalUsage.usage.total.toLocaleString();
+  const totalCacheText =
+    totalUsage.reported === 0
+      ? ""
+      : `cache read ${totalUsage.usage.cacheRead.toLocaleString()} • cache write ${totalUsage.usage.cacheWrite.toLocaleString()}`;
   const wallStarts = requests
     .map((r) => parseTs(r.ts))
     .filter((n): n is number => n != null);
@@ -369,7 +396,7 @@ ${toolCalls
       <div class="card"><div class="k">Requests</div><div class="v">${escapeHtml(String(requests.length))}</div></div>
       <div class="card"><div class="k">Files reviewed</div><div class="v">${escapeHtml(String(fileGroups.size))}</div></div>
       <div class="card"><div class="k">Errors</div><div class="v${errors.length > 0 ? " bad" : ""}">${escapeHtml(String(errors.length))}</div></div>
-      <div class="card"><div class="k">Total tokens</div><div class="v">${escapeHtml(totalTokensText)}</div></div>
+      <div class="card"><div class="k">Total tokens</div><div class="v">${escapeHtml(totalTokensText)}</div><div class="k">${escapeHtml(totalCacheText)}</div></div>
       <div class="card"><div class="k">Wall time</div><div class="v">${escapeHtml(wallText)}</div></div>
       <div class="card"><div class="k">Tool calls</div><div class="v">${escapeHtml(String(toolCalls.length))}</div></div>
       <div class="card"><div class="k">Final Status</div><div class="v ok">${escapeHtml(finalStatus)}</div></div>
@@ -383,6 +410,8 @@ ${toolCalls
             <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Pass</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Requests</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Prompt</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Cache read</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Cache write</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Completion</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Total</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--line);">Duration</th>
