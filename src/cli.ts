@@ -4,7 +4,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { readFile } from "node:fs/promises";
-import { parsePromptProfile } from "./prompt/index.js";
+import {
+  formatMergeRequestIntent,
+  parsePromptProfile,
+} from "./prompt/index.js";
 import {
   envOrDefault,
   envOrUndefined,
@@ -198,6 +201,12 @@ async function main(): Promise<void> {
       mr: mrChanges,
       logStep,
     });
+    const mergeRequestIntent = formatMergeRequestIntent(mrChanges);
+    logStep(
+      mergeRequestIntent == null
+        ? "MR has no title or description; reviewing without stated intent."
+        : `Using MR title and description as stated intent (${mergeRequestIntent.length} chars).`,
+    );
 
     logStep(
       `Requesting AI review with model: ${aiModel} (${provider}, multi-pass pipeline)`,
@@ -223,6 +232,7 @@ async function main(): Promise<void> {
       promptProfile,
       allowProfileAutoDemote,
       reviewInstructions,
+      mergeRequestIntent,
       loggers,
       debugRecordWriter,
     });

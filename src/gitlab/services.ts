@@ -167,6 +167,8 @@ export interface MergeRequestChange {
 }
 
 interface MergeRequestChangesResponse {
+  title?: string;
+  description?: string | null;
   changes?: MergeRequestChange[];
   diff_refs?: MergeRequestChangesDiffRef;
   target_branch?: string;

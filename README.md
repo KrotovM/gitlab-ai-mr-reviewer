@@ -141,6 +141,14 @@ Commit a `REVIEW.md` to the repository root to tell the reviewer what matters in
 - Only the first 8,000 characters are used; the job log says when a file is longer. The file is sent with every model call, so keep it short.
 - Without `REVIEW.md` the review runs as before.
 
+## Stated intent (MR title and description)
+
+The reviewer checks the code against what the MR says it does. Its title and description go to every pass after triage, so a finding can be "the description says 3 retries, the code allows 30". Write what the change is meant to do, not just a ticket number; an empty description means the review only looks for plain bugs.
+
+- Triage doesn't get them: its summary describes what the diff does, and the review compares that with what the author says.
+- The text is treated as the author's claim, not as instructions. HTML comments (`<!-- -->`, e.g. template hints) are removed first, since readers of the MR page never see them.
+- Only the first 3,000 characters are used.
+
 ## Benchmark
 
 Head-to-head against [Alibaba OpenCodeReview](https://github.com/alibaba/open-code-review) v1.8.10 (via its official GitLab CI recipe) on a demo MR with 4 seeded bugs: an auth bypass (`API_KEYS` unset → empty key accepted), a rate limiter whose window never resets, an unbounded per-IP counters Map, and a null-deref crash in a stats endpoint. Same MR, same commit range, same backends.

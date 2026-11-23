@@ -29,6 +29,7 @@ import {
   type TriageFileInput,
   type TriageFileVerdict,
   type TriageResult,
+  withMergeRequestIntent,
   withReviewInstructions,
 } from "../prompt/index.js";
 import {
@@ -81,6 +82,10 @@ type RunContext = {
   forceTools: boolean;
   /** Repository REVIEW.md (see loadReviewInstructions), appended to every pass. */
   reviewInstructions?: string;
+  /** MR title + description (see formatMergeRequestIntent). Every pass after
+   *  triage gets it; triage doesn't, so its summary says what the diff does and
+   *  the review can compare that with what the author says it should do. */
+  mergeRequestIntent?: string;
   loggers: LoggerFns;
   debugRecordWriter?: DebugRecordWriter;
 };
@@ -622,14 +627,17 @@ async function reviewSinglePass(
   ctx.loggers.logStep(
     `Single-pass review started for ${changes.length} file(s) (fallback mode).`,
   );
-  const messages = withReviewInstructions(
-    buildPrompt({
-      changes: changes.map((change) => ({ path: change.new_path, diff: change.diff })),
-      limits: promptLimits,
-      allowTools: true,
-      profile: promptProfile,
-    }),
-    ctx.reviewInstructions,
+  const messages = withMergeRequestIntent(
+    withReviewInstructions(
+      buildPrompt({
+        changes: changes.map((change) => ({ path: change.new_path, diff: change.diff })),
+        limits: promptLimits,
+        allowTools: true,
+        profile: promptProfile,
+      }),
+      ctx.reviewInstructions,
+    ),
+    ctx.mergeRequestIntent,
   );
   messages.push({
     role: "user",
@@ -672,8 +680,15 @@ export async function reviewMergeRequestMultiPass(
     promptProfile = DEFAULT_PROMPT_PROFILE,
     allowProfileAutoDemote = false,
     reviewInstructions,
+    mergeRequestIntent,
   } = params;
   const { logStep } = params.loggers;
+  // REVIEW.md on every pass; the stated intent on every pass after triage.
+  const withContext = (messages: ChatCompletionMessageParam[]) =>
+    withMergeRequestIntent(
+      withReviewInstructions(messages, reviewInstructions),
+      mergeRequestIntent,
+    );
   let effectiveProfile: PromptProfile = promptProfile;
 
   const triageInputs: TriageFileInput[] = changes.map((c) => ({
@@ -830,7 +845,7 @@ export async function reviewMergeRequestMultiPass(
           label: `file_review_${path}`,
           phase: "file_review",
           context: path,
-          messages: withReviewInstructions(
+          messages: withContext(
             buildFileReviewPrompt({
               filePath: path,
               fileDiff: truncateWithMarker(change.diff, promptLimits.maxDiffChars, path),
@@ -839,7 +854,6 @@ export async function reviewMergeRequestMultiPass(
               allowTools: true,
               profile: effectiveProfile,
             }),
-            reviewInstructions,
           ),
           maxRounds: MAX_FILE_TOOL_ROUNDS,
           temperature: 0.2,
@@ -915,7 +929,7 @@ export async function reviewMergeRequestMultiPass(
     consolidateCompletion = await complete(ctx, "consolidate_pass", {
       model: aiModel,
       temperature: 0.1,
-      messages: withReviewInstructions(consolidateMessages, reviewInstructions),
+      messages: withContext(consolidateMessages),
     });
   } catch (error: any) {
     logStep(
@@ -936,7 +950,7 @@ export async function reviewMergeRequestMultiPass(
       label: "verification_pass",
       phase: "verification",
       context: "(verify)",
-      messages: withReviewInstructions(
+      messages: withContext(
         buildVerificationPrompt({
           perFileFindings,
           summary,
@@ -945,7 +959,6 @@ export async function reviewMergeRequestMultiPass(
           refs: ctx.refs,
           profile: effectiveProfile,
         }),
-        reviewInstructions,
       ),
       maxRounds: MAX_VERIFICATION_TOOL_ROUNDS,
       temperature: 0,

@@ -11,7 +11,7 @@ body:
     attributes:
       label: Version
       description: The job log prints it at the top, `gitlab-ai-review vX.Y.Z`.
-      placeholder: 1.0.47
+      placeholder: 1.0.48
     validations:
       required: true
   - type: dropdown
