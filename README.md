@@ -1,46 +1,50 @@
 <!-- @format -->
 
-# AI Code Reviewer
+# gitlab-ai-review
 
 [![npm](https://img.shields.io/npm/v/@krotovm/gitlab-ai-review)](https://www.npmjs.com/package/@krotovm/gitlab-ai-review)
 [![downloads](https://img.shields.io/npm/dm/@krotovm/gitlab-ai-review)](https://www.npmjs.com/package/@krotovm/gitlab-ai-review)
 [![license](https://img.shields.io/npm/l/@krotovm/gitlab-ai-review)](https://github.com/KrotovM/gitlab-ai-mr-reviewer/blob/main/LICENSE)
 [![GitLab CI/CD Catalog](https://img.shields.io/gitlab/v/release/KrotovM/gitlab-ai-review?label=GitLab%20CI%2FCD%20Catalog&color=fc6d26)](https://gitlab.com/explore/catalog/KrotovM/gitlab-ai-review)
 
-Gitlab AI Code Review is a CLI tool that leverages OpenAI or Anthropic (Claude) models to automatically review code changes and post a Markdown review to GitLab merge requests from CI.
+AI code review for GitLab merge requests, run as a CI job. It reviews the diff with OpenAI, Anthropic (Claude) or any OpenAI-compatible model, including self-hosted ones, and posts the findings as a merge request comment.
 
-> **Benchmark:** on an AI-generated merge request (36 files, 5 seeded defects, three of them contradicting the MR description), gitlab-ai-review v1.0.49 found **5/5 with zero noise** on gpt-5.4, Claude Opus 5.5 and a self-hosted model; OpenCodeReview found 2–4/5 with 3–12 extra comments. [Details and methodology](#benchmark)
+> **Benchmark:** on an AI-generated merge request (36 files, 5 seeded defects, three of them contradicting the MR description), gitlab-ai-review v1.0.49 found **5/5 with zero noise** on gpt-5.4, Claude Opus 5.5 and a self-hosted model; OpenCodeReview found 2–4/5 with 3–12 extra comments. One run per cell, on MRs built by the author: [details, methodology and raw output](#benchmark).
 
 ![AI review comment posted on a GitLab merge request](docs/review.png)
 
 ## Features
 
-- Automatically reviews code changes in GitLab repositories
-- Provides feedback on bugs and optimization opportunities
-- Generates Markdown-formatted responses for easy readability in GitLab as merge request comment
-- Follows your project's review rules from [`REVIEW.md`](#review-rules-reviewmd)
+- **Few false positives.** A verification pass re-checks every finding against the code at the MR head and drops the ones it can't confirm before anything is posted.
+- **Checks the code against the MR description.** "The description says 30 days, the code uses 30 hours" is a finding. See [Stated intent](#stated-intent-mr-title-and-description).
+- **Reads the repository, not just the diff.** The per-file review can open files and search the code to confirm a bug.
+- **Follows your rules** from a [`REVIEW.md`](#review-rules-reviewmd) on the target branch.
+- **One comment per MR**, updated on every push. Optionally, findings become [resolvable diff threads](#inline-comments).
+- **Any model:** OpenAI, Anthropic, or an [OpenAI-compatible endpoint](#openai-compatible-and-self-hosted-models), with a prompt profile for small local models.
+- **Just a CI job:** gitlab.com or self-managed GitLab; no server, webhook or GitLab app to run.
+- **Debug report** per run: tokens, durations, triage decisions and per-file findings.
 
-## Usage
+## Quick start
 
-### GitLab CI/CD
+1. **Create a GitLab token.** A project access token (Settings → Access tokens) with the `api` scope and the Developer role. A personal access token with `api` scope works too; comments are then posted as that user. `CI_JOB_TOKEN` can't post MR comments or use the search API.
+2. **Add CI/CD variables** (Settings → CI/CD → Variables): `PROJECT_ACCESS_TOKEN` and `OPENAI_API_KEY`, both Masked. For Claude, set `AI_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` instead of the OpenAI key. Leave Protected off unless MR source branches are protected: GitLab doesn't pass protected variables to their pipelines. Anyone who can change `.gitlab-ci.yml` in a branch can read unprotected variables, so use a dedicated project token.
+3. **Add the job** to `.gitlab-ci.yml`:
 
-Run the tool in Merge Request pipelines to post an AI review comment to the MR. Later pipelines update that same comment instead of adding a new one on every push (GitLab marks it as edited); if it can't be found or edited, a new comment is posted.
+   ```yaml
+   stages: [review]
 
-Minimal MR review job:
+   ai_review:
+     stage: review
+     image: node:24
+     rules:
+       - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+     script:
+       - npx -y @krotovm/gitlab-ai-review
+   ```
 
-```yaml
-stages: [review]
+Open a merge request: the job posts the review as a comment. Later pipelines update that comment instead of adding a new one (GitLab marks it as edited); if it can't be found or edited, a new one is posted.
 
-ai_review:
-  stage: review
-  image: node:24
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  script:
-    - npx -y @krotovm/gitlab-ai-review
-```
-
-Or include it as a [CI/CD component from the GitLab Catalog](https://gitlab.com/explore/catalog/KrotovM/gitlab-ai-review) (gitlab.com):
+Or include the [CI/CD component from the GitLab Catalog](https://gitlab.com/explore/catalog/KrotovM/gitlab-ai-review) (gitlab.com), which also keeps the debug report as an artifact:
 
 ```yaml
 include:
@@ -49,16 +53,74 @@ include:
       args: "--include-artifacts"
 ```
 
-Save debug HTML as a CI artifact:
+Component versions are separate from npm versions: the component runs the latest npm release unless you pin one with `inputs.version`.
+
+## Configuration
+
+### Environment variables
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `PROJECT_ACCESS_TOKEN` | yes | | GitLab project or personal access token with the `api` scope. `GITLAB_TOKEN` is an alias. |
+| `OPENAI_API_KEY` | for `openai` | | OpenAI API key, or any value for an endpoint that doesn't check it. |
+| `ANTHROPIC_API_KEY` | for `anthropic` | | Anthropic API key. |
+| `AI_PROVIDER` | | `openai` | `openai` or `anthropic`. |
+| `AI_MODEL` | | `gpt-5.4` (openai), `claude-opus-5-5` (anthropic) | Model name, e.g. `claude-sonnet-5-5`. |
+| `OPENAI_BASE_URL` | | OpenAI API | Any [OpenAI-compatible endpoint](#openai-compatible-and-self-hosted-models). |
+| `ANTHROPIC_BASE_URL` | | Anthropic API | Overrides the Anthropic endpoint. |
+| `AI_PROMPT_PROFILE` | | `default`, auto | `default` or `weak`, see [below](#openai-compatible-and-self-hosted-models). |
+| `AI_REVIEW_CONCURRENCY` | | `2` | Same as `--max-review-concurrency`, handy as a CI/CD variable; the flag wins when both are set. |
+| `AI_REVIEW_ARTIFACT_HTML_FILE` | | `ai-review-report.html` | File name of the `--include-artifacts` report. |
+
+GitLab provides these in merge request pipelines: `CI_API_V4_URL`, `CI_PROJECT_ID`, `CI_MERGE_REQUEST_IID` and `CI_MERGE_REQUEST_PROJECT_ID` (the MR's target project; used instead of `CI_PROJECT_ID`, so MRs from forks work).
+
+### Flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--include-artifacts` | off | Write the [debug report](#debug-report) to `ai-review-report.html`. |
+| `--inline-comments` | off | Post findings on changed lines as resolvable diff threads; the rest stays in the summary comment. See [Inline comments](#inline-comments). |
+| `--max-findings` | `5` | Max findings in the final review. |
+| `--ignore-ext` | | File extensions to skip, comma-separated, e.g. `--ignore-ext=md,lock`. Lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `go.sum`, …), minified bundles, source maps, test snapshots and files with no diff text (pure renames, binaries) are always skipped. |
+| `--max-review-concurrency` | `2` | Parallel per-file review calls. Set to 1 for single-GPU backends that queue-starve long requests. |
+| `--triage-diff-chars` | `2000` | Max chars per file diff in the triage pass. Raise it for large diffs whose first hunks are mostly git headers. |
+| `--max-diff-chars` | `16000` | Max chars per file diff in the per-file review and the single-pass fallback. |
+| `--max-total-prompt-chars` | `220000` | Prompt size cap for triage and the single-pass fallback. On large MRs triage shortens each file diff below `--triage-diff-chars` to stay under it. |
+| `--max-diffs` | `50` | Max file diffs in the single-pass fallback prompt. |
+| `--force-tools` | off | Force a tool call in the first round of each tool-enabled pass (OpenAI only). |
+| `--debug` | off | Print full error details (stack and API error fields). |
+| `--help` | | Show help output. |
+
+Unknown flags (and a flag with a missing or unexpected value) don't fail the job: they are ignored and listed in a warning at the top of the job log, so check it after changing flags.
+
+### Anthropic (Claude)
+
+With `AI_PROVIDER=anthropic` the review calls the Anthropic Messages API directly. Tool rounds use prompt caching, and a request declined by Claude's safety classifiers is re-run server-side on Anthropic's recommended fallback model. `--force-tools` is ignored there (Claude Opus/Sonnet 5.5 reject forced tool calls).
+
+### OpenAI-compatible and self-hosted models
+
+`OPENAI_BASE_URL` is passed to the `openai` SDK client, so any OpenAI-compatible gateway, proxy or server (vLLM, Ollama, …) works. `OPENAI_API_KEY` is still required; set any value if the endpoint doesn't check it.
 
 ```yaml
-stages: [review]
-
 ai_review:
-  stage: review
-  image: node:24
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  # ...the job from Quick start, plus:
+  variables:
+    OPENAI_BASE_URL: http://llm.internal:8000/v1
+    AI_MODEL: your-model
+    AI_PROMPT_PROFILE: weak # for small or heavily quantized models
+  script:
+    - npx -y @krotovm/gitlab-ai-review --max-review-concurrency=1
+```
+
+Use `AI_PROMPT_PROFILE=weak` for small or heavily quantized models (≤ ~7B, local Ollama, etc.). It uses shorter system prompts, positive rules instead of negations, and inline few-shot examples for every pass, which dramatically improves output-format adherence on weak models. When the variable is not set, the profile is auto-detected: if the triage pass returns unparseable JSON with `default` prompts, triage is retried once with `weak` and, on success, the whole run continues with it. Set the variable explicitly to pin a profile and disable auto-detection.
+
+### Debug report
+
+`--include-artifacts` writes an HTML report; keep it as a job artifact:
+
+```yaml
+ai_review:
+  # ...the job from Quick start
   script:
     - npx -y @krotovm/gitlab-ai-review --include-artifacts
   artifacts:
@@ -67,52 +129,9 @@ ai_review:
       - ai-review-report.html
 ```
 
-The HTML artifact breaks the run down per pass — tokens, durations, triage decisions, per-file findings, and errors:
+It breaks the run down per pass: tokens (with prompt-cache reads and writes), durations, triage decisions, per-file findings and errors. It contains model output about your code, so in public projects restrict who can download job artifacts.
 
 ![AI review debug report artifact](docs/report.png)
-
-## Env variables
-
-Set these in your project/group CI settings:
-
-- `AI_PROVIDER` (optional, default: `openai`; one of `openai` \| `anthropic`)
-- `OPENAI_API_KEY` (required for `openai`)
-- `OPENAI_BASE_URL` (optional, for OpenAI-compatible providers/proxies)
-- `ANTHROPIC_API_KEY` (required for `anthropic`)
-- `AI_MODEL` (optional, default: `gpt-4o-mini` for `openai`, `claude-opus-5-5` for `anthropic`; examples: `gpt-4o`, `claude-sonnet-5-5`)
-- `AI_PROMPT_PROFILE` (optional, default: `default`; one of `default` \| `weak`). Use `weak` for small or heavily-quantized models (≤ ~7B, local Ollama, etc.). The `weak` profile uses shorter system prompts, positive rules instead of negations, and inline few-shot examples for triage / per-file review / consolidation / verification, which dramatically improves output-format adherence on weak models. When the variable is not set, the profile is auto-detected: if the triage pass returns unparseable JSON with `default` prompts, triage is retried once with `weak` and, on success, the whole run continues with it. Set the variable explicitly to pin a profile and disable auto-detection.
-- `PROJECT_ACCESS_TOKEN` (required; project or personal access token with `api` scope — `CI_JOB_TOKEN` can't post MR comments or use the search API)
-- `GITLAB_TOKEN` (optional alias for `PROJECT_ACCESS_TOKEN`)
-- `AI_REVIEW_CONCURRENCY` (optional) — same as `--max-review-concurrency`, handy as a CI/CD variable; the flag wins when both are set.
-- `AI_REVIEW_ARTIFACT_HTML_FILE` (optional, default: `ai-review-report.html`; used with `--include-artifacts`)
-
-`OPENAI_BASE_URL` is passed through to the `openai` SDK client, so you can use any OpenAI-compatible gateway/provider endpoint.
-
-With `AI_PROVIDER=anthropic` the review calls the Anthropic Messages API directly (`ANTHROPIC_BASE_URL` overrides the endpoint the same way). Tool rounds use prompt caching, and a request declined by Claude's safety classifiers is re-run server-side on Anthropic's recommended fallback model. `--force-tools` is ignored there (Claude Opus/Sonnet 5.5 reject forced tool calls).
-
-GitLab provides these automatically in Merge Request pipelines:
-
-- `CI_API_V4_URL`
-- `CI_PROJECT_ID`
-- `CI_MERGE_REQUEST_IID`
-- `CI_MERGE_REQUEST_PROJECT_ID` (the MR's target project; used instead of `CI_PROJECT_ID`, so MRs from forks work)
-
-## Flags
-
-- `--ignore-ext=md,lock` - Exclude file extensions from review (comma-separated). Lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `go.sum`, …), minified bundles, source maps, test snapshots, and files with no diff text (pure renames, binaries) are always skipped.
-- `--max-diffs=50` - Max number of diffs included in the prompt (single-pass fallback only).
-- `--max-diff-chars=16000` - Max chars per file diff (per-file review and single-pass fallback).
-- `--max-total-prompt-chars=220000` - Hard cap for prompt size (triage and single-pass fallback). On large MRs triage shortens each file diff below `--triage-diff-chars` to stay under it.
-- `--triage-diff-chars=2000` - Max chars per file diff sent to the triage pass (Pass 1). Increase for large diffs where the first hunks are mostly git headers.
-- `--max-findings=5` - Max findings in the final review (CI multi-pass only).
-- `--max-review-concurrency=2` - Parallel per-file review API calls (CI multi-pass only). Set to 1 for single-GPU backends that queue-starve long requests.
-- `--force-tools` - Force a tool call in the first round of each tool-enabled pass (OpenAI only).
-- `--debug` - Print full error details (stack and API error fields).
-- `--include-artifacts` - Generate a local HTML debug artifact with per-pass outputs/tokens.
-- `--inline-comments` - Post findings on changed lines as resolvable diff threads; the rest stays in the summary comment. See [Inline comments](#inline-comments).
-- `--help` - Show help output.
-
-Unknown flags (and a flag with a missing or unexpected value) don't fail the job: they are ignored and listed in a warning at the top of the job log, so check it after changing flags.
 
 ## Inline comments
 
@@ -150,6 +169,26 @@ The reviewer checks the code against what the MR says it does. Its title and des
 - Triage doesn't get them: its summary describes what the diff does, and the review compares that with what the author says.
 - The text is treated as the author's claim, not as instructions. HTML comments (`<!-- -->`, e.g. template hints) are removed first, since readers of the MR page never see them.
 - Only the first 3,000 characters are used.
+
+## Data and cost
+
+- The job talks only to your GitLab API and your model provider. There is no telemetry.
+- The model gets the MR diff (minus skipped files), the MR title and description, `REVIEW.md` from the target branch, and what it asks for through its tools: files of the same project at the MR's base or head, and GitLab code search results.
+- In GitLab the job writes one summary comment and, with `--inline-comments`, diff threads and the replies that resolve them.
+- Tokens per run in the [benchmark](#benchmark): 21k–43k for a 4-file MR, 102k–369k for a 36-file one. The [debug report](#debug-report) shows tokens for every run.
+
+## Troubleshooting
+
+- **`Missing required env vars: …`** The variable doesn't reach the job. Usually it is Protected while the MR's source branch isn't, or it is scoped to an environment.
+- **The job never starts.** It runs only in merge request pipelines (`$CI_PIPELINE_SOURCE == "merge_request_event"`), not in branch pipelines.
+- **HTTP 401 or 403 from GitLab.** The token expired, lacks the `api` scope, or is `CI_JOB_TOKEN`. Resolving inline threads also needs the Developer role.
+- **"GitLab truncated this merge request's changes".** The MR exceeds GitLab's diff limits; only the files GitLab returns are reviewed.
+- **Empty or garbled review from a small model.** Set `AI_PROMPT_PROFILE=weak`.
+- **Timeouts on a single-GPU backend.** Use `--max-review-concurrency=1`.
+
+For anything else, rerun with `--include-artifacts --debug` and attach the report to a [bug report](https://github.com/KrotovM/gitlab-ai-mr-reviewer/issues/new/choose); check it for code you can't share first.
+
+To run a review outside CI, fill in a copy of [`.env.sample`](.env.sample) and run `set -a; . ./.env; set +a; npx -y @krotovm/gitlab-ai-review`. It posts to that merge request just like a CI run.
 
 ## Benchmark
 
@@ -195,6 +234,7 @@ Defects 1–3 contradict the MR description; the code, docs and spec never state
 - Triage drops the docs, the OpenAPI spec, the fixture, config files and deleted modules (8–11 of the 36 files) before the per-file pass.
 - Only gitlab-ai-review finds defect 2: the 410 promise exists only in the MR description. OpenCodeReview still infers defect 1 from the code (a default in hours next to `ttlDays` in days) and, on Opus, defect 3 through the crash.
 - Two of OpenCodeReview's gpt-5.4 comments are wrong about the code: that the MR has no tests (it has 37), and that a rounded uptime is fractional.
+- Raw output of the gpt-5.4 pair: gitlab-ai-review's [debug report](docs/benchmark/mr2-gitlab-ai-review-1.0.49-gpt-5.4.html) (download it and open in a browser) and OpenCodeReview's [JSON result](docs/benchmark/mr2-opencodereview-1.14.2-gpt-5.4.json) with all 12 of its comments.
 
 ### Methodology
 
@@ -204,7 +244,7 @@ Defects 1–3 contradict the MR description; the code, docs and spec never state
 - Tokens include prompt-cache reads, which cost a fraction of normal input: OpenCodeReview's Opus run on the second MR read 408.6k of its 536.8k input tokens from the cache.
 - gitlab-ai-review reads the MR title and description ([Stated intent](#stated-intent-mr-title-and-description)); OpenCodeReview reviews the git range only.
 
-## Architecture
+## How it works
 
 The reviewer uses a four-pass pipeline optimized for large merge requests:
 
@@ -218,3 +258,11 @@ If the triage pass fails (API error, unparseable response), the pipeline falls b
 The pipeline in a CI job log — triage, parallel tool-assisted file reviews, consolidation, verification:
 
 ![Multi-pass pipeline in the CI job log](docs/job.png)
+
+## Contributing
+
+Bug reports and pull requests are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, see [SECURITY.md](SECURITY.md). Release notes are on [GitHub Releases](https://github.com/KrotovM/gitlab-ai-mr-reviewer/releases).
+
+## License
+
+[MIT](LICENSE)

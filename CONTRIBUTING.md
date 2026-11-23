@@ -13,7 +13,7 @@ pnpm test      # type-check, then node --test on test/*.test.mjs
 
 ## Trying a change on a real merge request
 
-Push your branch to your fork and, in the review job from the [README](README.md#gitlab-cicd), run it instead of the npm package:
+Push your branch to your fork and, in the review job from the [README](README.md#quick-start), run it instead of the npm package:
 
 ```yaml
   script:

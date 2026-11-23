@@ -11,7 +11,7 @@ body:
     attributes:
       label: Version
       description: The job log prints it at the top, `gitlab-ai-review vX.Y.Z`.
-      placeholder: 1.0.50
+      placeholder: 1.0.51
     validations:
       required: true
   - type: dropdown
@@ -39,7 +39,7 @@ body:
     attributes:
       label: Model
       description: The value of `AI_MODEL`, or "default".
-      placeholder: gpt-4o-mini
+      placeholder: gpt-5.4
   - type: dropdown
     id: gitlab
     attributes:
