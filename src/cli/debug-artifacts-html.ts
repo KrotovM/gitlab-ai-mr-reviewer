@@ -381,7 +381,7 @@ ${toolCalls
     .tokens{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--muted);}
     .finding{border-left:3px solid var(--med);background:#131f36;padding:10px 12px;border-radius:8px;margin:8px 0;} .finding.high{border-left-color:var(--high);}
     .finding .title{font-weight:700;} .meta{color:var(--muted);font-size:12px;margin:4px 0;}
-    table{width:100%;border-collapse:collapse;font-size:13px;}
+    table{width:100%;border-collapse:collapse;font-size:13px;} td:nth-child(n+4){overflow-wrap:anywhere;}
     pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;background:var(--mono-bg);border:1px solid var(--line);padding:10px;border-radius:8px;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d7e3ff;}
     @media (max-width:900px){.grid{grid-template-columns:1fr 1fr;}} @media (max-width:520px){.grid{grid-template-columns:1fr;}}
   </style>

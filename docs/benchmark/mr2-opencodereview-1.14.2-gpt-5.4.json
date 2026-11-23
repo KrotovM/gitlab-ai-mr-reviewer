@@ -1,0 +1,525 @@
+{
+  "status": "complete",
+  "llm": {
+    "model": "gpt-5.4"
+  },
+  "message": "Review complete: 12 finding(s) across 22 selected item(s).",
+  "summary": {
+    "files_reviewed": 22,
+    "comments": 12,
+    "total_tokens": 210409,
+    "input_tokens": 205153,
+    "output_tokens": 5256,
+    "cache_read_tokens": 119680,
+    "elapsed": "58s"
+  },
+  "tool_calls": {
+    "total": 43,
+    "by_tool": {
+      "code_comment": 8,
+      "code_search": 8,
+      "file_read": 25,
+      "file_read_diff": 2
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": "package.json",
+      "content": "The new `test` script introduces the Node.js built-in test runner, but there are no test files in the repository changes under the default `test`/`*.test.*` naming conventions. As written, `npm test` will likely fail to discover or execute the existing test suite unless those files were also renamed elsewhere. Please either align the test file naming/placement with `node --test` defaults or make the script explicitly target the current test files.",
+      "suggestion_code": "    \"test\": \"node --test test/**/*.js\"",
+      "existing_code": "    \"test\": \"node --test\"",
+      "start_line": 12,
+      "end_line": 12,
+      "category": "maintainability",
+      "severity": "medium"
+    },
+    {
+      "path": "src/server.js",
+      "content": "`express.json()` parse failures currently fall through to `errorHandler`, which returns the raw `err.message` for any non-500 status. For malformed JSON this typically exposes Express/body-parser internals like `Unexpected token ... in JSON at position ...`, rather than the user-friendly 400 response described in the review checklist. Consider normalizing JSON syntax errors here or in `errorHandler` to a stable message such as `invalid JSON body`.",
+      "existing_code": "app.use(express.json({ limit: MAX_BODY_SIZE }));",
+      "start_line": 13,
+      "end_line": 13,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "docs/openapi.yaml",
+      "content": "The health schema documents `uptimeSeconds` as an integer, but `src/handlers/health.js` returns `Math.round(process.uptime() * 10) / 10`, which is fractional. The spec should allow a number here, or the handler should round to an integer, otherwise generated clients/validators will disagree with the actual response.",
+      "existing_code": "                  uptimeSeconds:\n                    type: integer",
+      "start_line": 174,
+      "end_line": 175,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/config.js",
+      "content": "This constant is used as the default lifetime for links without `ttlDays`, but `30 * 60 * 60 * 1000` is 30 hours, not 30 days. That makes default links expire much earlier than the API contract implies. If the intended default is 30 days, this should use `30 * 24 * 60 * 60 * 1000` (or `30 * MS_PER_DAY`).",
+      "existing_code": "export const DEFAULT_TTL_MS = 30 * 60 * 60 * 1000;",
+      "start_line": 7,
+      "end_line": 7,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/config.js",
+      "content": "These numeric env vars are parsed but never validated. Invalid values like `PORT=abc`, `CODE_LENGTH=0`, or `PURGE_INTERVAL_MS=-1` can propagate into `app.listen`, `randomBytes`, or `setInterval` and fail at runtime in less obvious places. Consider validating them at startup and either throwing a clear configuration error or falling back to safe defaults.",
+      "existing_code": "export const PORT = Number(process.env.PORT ?? 3000);\n\n/** Lifetime of a link created without an explicit ttlDays. */\nexport const DEFAULT_TTL_MS = 30 * 60 * 60 * 1000;\n\n/** Length of generated short codes. */\nexport const CODE_LENGTH = Number(process.env.CODE_LENGTH ?? 6);\n\n/** Largest JSON request body the API accepts. */\nexport const MAX_BODY_SIZE = process.env.MAX_BODY_SIZE ?? \"16kb\";\n\n/** How often expired links are purged from memory. */\nexport const PURGE_INTERVAL_MS = Number(process.env.PURGE_INTERVAL_MS ?? 60_000);",
+      "start_line": 4,
+      "end_line": 16,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/server.js",
+      "content": "This interval is created as a top-level side effect when the module is imported, which makes the server harder to reuse in tests or from another entrypoint and can also start duplicate purge timers if `src/server.js` is imported more than once in the same process. Consider moving app startup and background job wiring behind an explicit bootstrap function so the timer is created exactly once when the process is intentionally started.",
+      "existing_code": "setInterval(() =\u003e {\n  const removed = purgeExpired();\n  if (removed \u003e 0) logger.info(\"purged expired links\", { removed });\n}, PURGE_INTERVAL_MS).unref();",
+      "start_line": 18,
+      "end_line": 21,
+      "category": "maintainability",
+      "severity": "medium"
+    },
+    {
+      "path": "src/middleware/errorHandler.js",
+      "content": "For non-Error throw values (for example `throw \"bad request\"` or `next({ status: 400 })`), `err.message` is `undefined`, so this can return `{ error: undefined }` to clients. Consider normalizing the message before sending the response so 4xx errors always produce a string payload.",
+      "existing_code": "  res.status(status).json({ error: status \u003e= 500 ? \"internal error\" : err.message });",
+      "start_line": 14,
+      "end_line": 14,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/util/logger.js",
+      "content": "If `fields` contains a circular reference, `BigInt`, or another non-JSON-serializable value, `JSON.stringify` will throw and can break request handling/logging paths. Since this logger is used inside middleware and the error handler, it should fail closed (e.g. catch serialization errors and fall back to a minimal log line) instead of throwing from the logger itself.",
+      "existing_code": "  const line = JSON.stringify({ level, time: new Date().toISOString(), message, ...fields });",
+      "start_line": 9,
+      "end_line": 9,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/middleware/requestId.js",
+      "content": "This always overwrites any `x-request-id` supplied by an upstream proxy or gateway. In production that breaks request correlation across services, because the ID emitted here will no longer match the one already attached to the request in other logs. Consider reusing a valid incoming request ID when present and only generating a new one as a fallback.",
+      "suggestion_code": "  const incomingId = req.get(\"x-request-id\");\n  req.id = incomingId || randomUUID();\n  res.setHeader(\"x-request-id\", req.id);\n  next();",
+      "existing_code": "  req.id = randomUUID();\n  res.setHeader(\"x-request-id\", req.id);\n  next();",
+      "start_line": 5,
+      "end_line": 7,
+      "category": "maintainability",
+      "severity": "medium"
+    },
+    {
+      "path": "docs/openapi.yaml",
+      "content": "The documented authorization behavior for this endpoint does not match the implementation. In `src/handlers/stats.js`, the handler currently returns `403` when `link.ownerKey === headerValue(req.header(\"x-api-key\"))`, which is the opposite of \"owner can access\" described here. Either the handler logic or this contract needs to be corrected so clients are not built against inverted auth behavior.",
+      "existing_code": "    get:\n      summary: Click statistics for the link's owner\n      security:\n        - apiKey: []",
+      "start_line": 108,
+      "end_line": 111,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/handlers/stats.js",
+      "content": "The authorization check is inverted here: it returns 403 when the provided API key matches the link owner's key, which blocks the legitimate owner and allows any other caller to read the stats. This should reject when the keys do not match.",
+      "suggestion_code": "  if (link.ownerKey !== headerValue(req.header(\"x-api-key\"))) {\n    return res.status(403).json({ error: \"forbidden\" });\n  }",
+      "existing_code": "  if (link.ownerKey === headerValue(req.header(\"x-api-key\"))) {\n    return res.status(403).json({ error: \"forbidden\" });\n  }",
+      "start_line": 11,
+      "end_line": 13,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/handlers/links.js",
+      "content": "`findLink` now takes an object parameter (`findLink({ code })` in the service), but this call still passes the alias string directly. That means the duplicate-alias check always misses existing links, so creating a link with an already-used alias can overwrite the previous entry instead of returning 409.",
+      "suggestion_code": "  if (alias != null \u0026\u0026 findLink({ code: alias }) != null) {\n    return res.status(409).json({ error: \"alias already taken\" });\n  }",
+      "existing_code": "  if (alias != null \u0026\u0026 findLink(alias) != null) {\n    return res.status(409).json({ error: \"alias already taken\" });\n  }",
+      "start_line": 28,
+      "end_line": 30,
+      "category": "bug",
+      "severity": "high"
+    }
+  ],
+  "groups": [
+    {
+      "label": "tooling and formatting setup",
+      "files": [
+        ".editorconfig",
+        ".prettierrc.json",
+        "package.json"
+      ]
+    },
+    {
+      "label": "API contract and routing bootstrap",
+      "files": [
+        "docs/openapi.yaml",
+        "src/routes/index.js",
+        "src/server.js"
+      ]
+    },
+    {
+      "label": "link management feature stack",
+      "files": [
+        "src/codes.js",
+        "src/config.js",
+        "src/handlers/links.js",
+        "src/handlers/redirect.js",
+        "src/repositories/linkRepository.js",
+        "src/services/linkService.js",
+        "src/util/validation.js"
+      ]
+    },
+    {
+      "label": "stats and health handlers",
+      "files": [
+        "src/handlers/health.js",
+        "src/handlers/stats.js",
+        "src/services/statsService.js"
+      ]
+    },
+    {
+      "label": "request pipeline middleware and logging utilities",
+      "files": [
+        "src/middleware/errorHandler.js",
+        "src/middleware/requestId.js",
+        "src/middleware/requestLog.js",
+        "src/util/logger.js",
+        "src/util/time.js"
+      ]
+    },
+    {
+      "label": "test helper infrastructure",
+      "files": [
+        "test/helpers/fakeHttp.js"
+      ]
+    }
+  ],
+  "session_id": "3ea5f080-a6b1-4aaa-a4d5-121282aa56fe",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "3ea5f080-a6b1-4aaa-a4d5-121282aa56fe",
+    "operation": "review",
+    "terminal_state": "complete",
+    "repository": {
+      "identity_sha256": "40cb4b8ec48b491f1c8bc2dfa27cf047169305368a743cc01fa7dd7eb70bf83e"
+    },
+    "input": {
+      "mode": "range",
+      "requested_from": "origin/bench/base",
+      "requested_head": "00d592a9239d4ad75e20fba7e77384e0202e485f",
+      "resolved_base": "58c71b91c30c165eec816328757899ea31171b61",
+      "resolved_head": "00d592a9239d4ad75e20fba7e77384e0202e485f",
+      "exact_range": "58c71b91c30c165eec816328757899ea31171b61..00d592a9239d4ad75e20fba7e77384e0202e485f",
+      "source_artifact_sha256": "ab01003c516125356e2274662270c962bb633d3a1dbdd8dd1a9b50b67fd8e68e"
+    },
+    "execution": {
+      "ocr_version": "v1.14.2",
+      "model": "gpt-5.4",
+      "configured_concurrency": 2,
+      "max_tool_request_times": 100,
+      "rule_config_sha256": "77361ee3e7a3ab0b4ab3b6fbe56c09c7c02e83722fcce12db220c2af88cd9d4e",
+      "runtime_config_sha256": "5cccb157eb23494b32a77137372690fe932f3e1ec2c7cbe7c728b08e2d21c415"
+    },
+    "coverage": {
+      "selected": [
+        {
+          "item_id": "3a911e8e2abec3aa67c8d38d27193b49ee2bc51575a77a95d25b09d3186ebcad",
+          "path": "src/middleware/requestId.js",
+          "fingerprint": "73b2bb7b585a2c02a0e03bd5a5cd682c189431b94c1f1edb86202dc849f788dc"
+        },
+        {
+          "item_id": "43c7d732a17532c32b857574d400429a9d85bd1d07a293e354e78a4371a181f5",
+          "path": "src/handlers/health.js",
+          "fingerprint": "ae57a335aad032643939a82a0e55ed0b5c7078aa63848b216aa46886d231bf98"
+        },
+        {
+          "item_id": "505be268585150eb44cd002184290a643c3547cc48c9196cab16583976943f3c",
+          "path": "src/handlers/links.js",
+          "fingerprint": "5f8027d5144980da08b1e9ebb99b7744d8af30a5399705ffc49ebd2451786847"
+        },
+        {
+          "item_id": "682d1a7e0f6624c01e98906e93893353662ae4fbf92a3087caa5f116a515d03e",
+          "path": "src/util/time.js",
+          "fingerprint": "783b0a3003b7f658f3ce52005ad72e1b8de535aba7fe740bbb9e86615f45aef2"
+        },
+        {
+          "item_id": "685d1af5a123b9c5a68fe412c22982c4deba761b886828df8750706a739721e3",
+          "path": "docs/openapi.yaml",
+          "fingerprint": "cf55361e90fbbf171137c431b35b4fe03b2d33f2748c0e45a5eea093cb3784ba"
+        },
+        {
+          "item_id": "80ccbcbb10042ed74b916db31f06becdb2ddcd80deb09a4f55acb7902db8a4ee",
+          "path": "src/config.js",
+          "fingerprint": "f62fbaa3c742ff652da440d9869b72ab0a67381dca6d3d278caec606a06de576"
+        },
+        {
+          "item_id": "831d45a59185649bc1bb76767accbc0122d661623372686b2a92b301e76be50d",
+          "path": ".editorconfig",
+          "fingerprint": "fcd425146d9b7d3997746ae76bee7615b67ecc871dc24311ff6578b99cb90566"
+        },
+        {
+          "item_id": "8ddcee7037924849c27166e3c607eba8a4817d02ffcfbc6dad411f9571beab39",
+          "path": "src/codes.js",
+          "fingerprint": "22aee3d56f54eac35b1c567185e0a240a7d76356a9dfbeb7d013b8b455d0c74f"
+        },
+        {
+          "item_id": "903c4b43bdd7250d988109cd83834fc88034e5081e3cdbfe34d79cc200bc85e8",
+          "path": "src/server.js",
+          "fingerprint": "ca502b0d31a14383da54b7360ae29ea050a49bc41ad7d6a525cef86672e5de38"
+        },
+        {
+          "item_id": "9d85dd850cc065eb1c5d6d099c8c727bf03b7f30deefb4bc4792f4190a3fd6ef",
+          "path": "src/util/logger.js",
+          "fingerprint": "fb599cec954526215cad26cef917ef6295a45168a2556227cd958969ddb9958e"
+        },
+        {
+          "item_id": "a70260013f8bf71085c3806170b9c1ffd05c2eff3daed45f08f4397c1620b56c",
+          "path": "src/repositories/linkRepository.js",
+          "fingerprint": "b746529a59032aac0a9aa878cc1625c362275cdb2963769fa95be096226a558d"
+        },
+        {
+          "item_id": "b13e9a705c77354f87c9fd4ab5e9442c83778806c4ae7ca39f190f2c84bcf06c",
+          "path": "src/handlers/stats.js",
+          "fingerprint": "a16cdaaff7642f9c6d40ca0a80ad860ec7b61a5ad6eed58b5df0acc9ba009ee9"
+        },
+        {
+          "item_id": "b22c1bd4009fae0e5911512a01ef30592c202ee970fd88baf90d70b51a4fc8d6",
+          "path": "src/middleware/errorHandler.js",
+          "fingerprint": "c2bbcb5101550fa2ad23a79c4289a6af06496ff2359e817983b42256ea3cb24a"
+        },
+        {
+          "item_id": "b479b34a49054caee4b2131badac6a153c4326693ed71437ae4fe750d335338b",
+          "path": "src/handlers/redirect.js",
+          "fingerprint": "8708fcf39198f24d69b4f8da0cb724218b2c5908da57c6563481f7f9bfd125e8"
+        },
+        {
+          "item_id": "b6b4d928e8fee8f0e687d2b88b50a90690b1ed253ebce302febb7d4b88e65948",
+          "path": "test/helpers/fakeHttp.js",
+          "fingerprint": "cfb1b0885e491e7f48fe2bc1bcb2d05925e468500ead1bdbeb89017ad87dc157"
+        },
+        {
+          "item_id": "bda1da3591a1b8e1d916c4cbc25ed2bf467f6088f629b1f8a98e4a0b6a92d411",
+          "path": "src/middleware/requestLog.js",
+          "fingerprint": "304bfd6452d4d6782f18f4a3f3f0b3d0a009c12666250caf9b73ae75392485cf"
+        },
+        {
+          "item_id": "bf46c263e3b99cc823ef47def2d6fd421e287f86c30adb6b84012c64c20cb2b9",
+          "path": "src/services/linkService.js",
+          "fingerprint": "9eb1a7e0bf18539edd8a93b14b202b551bcd27cb00a506c21b66f9c04d439ae9"
+        },
+        {
+          "item_id": "e3c7cbe310881d0348390239b00c219aa81fd9d09b83da3f90f33ba209ea7b6a",
+          "path": "package.json",
+          "fingerprint": "034c32a1c89e488707f7a4792a632aeaa48b5d696126b20ce60e468b05dc5bfd"
+        },
+        {
+          "item_id": "e455c48e8f569e0f1aefefb4808839477a81cf630abe37924d56c8ecd780c401",
+          "path": "src/util/validation.js",
+          "fingerprint": "42aff307f8319357c42f559c4e766faaac3683fe0e13b5eea1f344a90f854169"
+        },
+        {
+          "item_id": "f447dacb43e842534f447e4e3eac43a5ab488e04eaffd82ad901882e7062e3bc",
+          "path": ".prettierrc.json",
+          "fingerprint": "29da5f484e70250629e29e3bfe7cde598e7282161f7775d9fa371abcd7cd73a3"
+        },
+        {
+          "item_id": "f699b2a855d929d1af63e44067d4ddcee3ae8673bafc64c74c6cd6f2b66a75b3",
+          "path": "src/services/statsService.js",
+          "fingerprint": "72e2a0fe3a4e98f7e9a5d069b31ef26c8e208b379a928a09939072d3cedd09c6"
+        },
+        {
+          "item_id": "f71c7453e0f01214e26af42d171937fe7bbaddef1a642a6a06958a08b2736b05",
+          "path": "src/routes/index.js",
+          "fingerprint": "2694f5e77fd53c3c705fee9ded5a9005c326faab910809c1431db7683ee4389d"
+        }
+      ],
+      "completed": [
+        {
+          "item_id": "3a911e8e2abec3aa67c8d38d27193b49ee2bc51575a77a95d25b09d3186ebcad",
+          "path": "src/middleware/requestId.js",
+          "fingerprint": "73b2bb7b585a2c02a0e03bd5a5cd682c189431b94c1f1edb86202dc849f788dc"
+        },
+        {
+          "item_id": "43c7d732a17532c32b857574d400429a9d85bd1d07a293e354e78a4371a181f5",
+          "path": "src/handlers/health.js",
+          "fingerprint": "ae57a335aad032643939a82a0e55ed0b5c7078aa63848b216aa46886d231bf98"
+        },
+        {
+          "item_id": "505be268585150eb44cd002184290a643c3547cc48c9196cab16583976943f3c",
+          "path": "src/handlers/links.js",
+          "fingerprint": "5f8027d5144980da08b1e9ebb99b7744d8af30a5399705ffc49ebd2451786847"
+        },
+        {
+          "item_id": "682d1a7e0f6624c01e98906e93893353662ae4fbf92a3087caa5f116a515d03e",
+          "path": "src/util/time.js",
+          "fingerprint": "783b0a3003b7f658f3ce52005ad72e1b8de535aba7fe740bbb9e86615f45aef2"
+        },
+        {
+          "item_id": "685d1af5a123b9c5a68fe412c22982c4deba761b886828df8750706a739721e3",
+          "path": "docs/openapi.yaml",
+          "fingerprint": "cf55361e90fbbf171137c431b35b4fe03b2d33f2748c0e45a5eea093cb3784ba"
+        },
+        {
+          "item_id": "80ccbcbb10042ed74b916db31f06becdb2ddcd80deb09a4f55acb7902db8a4ee",
+          "path": "src/config.js",
+          "fingerprint": "f62fbaa3c742ff652da440d9869b72ab0a67381dca6d3d278caec606a06de576"
+        },
+        {
+          "item_id": "831d45a59185649bc1bb76767accbc0122d661623372686b2a92b301e76be50d",
+          "path": ".editorconfig",
+          "fingerprint": "fcd425146d9b7d3997746ae76bee7615b67ecc871dc24311ff6578b99cb90566"
+        },
+        {
+          "item_id": "8ddcee7037924849c27166e3c607eba8a4817d02ffcfbc6dad411f9571beab39",
+          "path": "src/codes.js",
+          "fingerprint": "22aee3d56f54eac35b1c567185e0a240a7d76356a9dfbeb7d013b8b455d0c74f"
+        },
+        {
+          "item_id": "903c4b43bdd7250d988109cd83834fc88034e5081e3cdbfe34d79cc200bc85e8",
+          "path": "src/server.js",
+          "fingerprint": "ca502b0d31a14383da54b7360ae29ea050a49bc41ad7d6a525cef86672e5de38"
+        },
+        {
+          "item_id": "9d85dd850cc065eb1c5d6d099c8c727bf03b7f30deefb4bc4792f4190a3fd6ef",
+          "path": "src/util/logger.js",
+          "fingerprint": "fb599cec954526215cad26cef917ef6295a45168a2556227cd958969ddb9958e"
+        },
+        {
+          "item_id": "a70260013f8bf71085c3806170b9c1ffd05c2eff3daed45f08f4397c1620b56c",
+          "path": "src/repositories/linkRepository.js",
+          "fingerprint": "b746529a59032aac0a9aa878cc1625c362275cdb2963769fa95be096226a558d"
+        },
+        {
+          "item_id": "b13e9a705c77354f87c9fd4ab5e9442c83778806c4ae7ca39f190f2c84bcf06c",
+          "path": "src/handlers/stats.js",
+          "fingerprint": "a16cdaaff7642f9c6d40ca0a80ad860ec7b61a5ad6eed58b5df0acc9ba009ee9"
+        },
+        {
+          "item_id": "b22c1bd4009fae0e5911512a01ef30592c202ee970fd88baf90d70b51a4fc8d6",
+          "path": "src/middleware/errorHandler.js",
+          "fingerprint": "c2bbcb5101550fa2ad23a79c4289a6af06496ff2359e817983b42256ea3cb24a"
+        },
+        {
+          "item_id": "b479b34a49054caee4b2131badac6a153c4326693ed71437ae4fe750d335338b",
+          "path": "src/handlers/redirect.js",
+          "fingerprint": "8708fcf39198f24d69b4f8da0cb724218b2c5908da57c6563481f7f9bfd125e8"
+        },
+        {
+          "item_id": "b6b4d928e8fee8f0e687d2b88b50a90690b1ed253ebce302febb7d4b88e65948",
+          "path": "test/helpers/fakeHttp.js",
+          "fingerprint": "cfb1b0885e491e7f48fe2bc1bcb2d05925e468500ead1bdbeb89017ad87dc157"
+        },
+        {
+          "item_id": "bda1da3591a1b8e1d916c4cbc25ed2bf467f6088f629b1f8a98e4a0b6a92d411",
+          "path": "src/middleware/requestLog.js",
+          "fingerprint": "304bfd6452d4d6782f18f4a3f3f0b3d0a009c12666250caf9b73ae75392485cf"
+        },
+        {
+          "item_id": "bf46c263e3b99cc823ef47def2d6fd421e287f86c30adb6b84012c64c20cb2b9",
+          "path": "src/services/linkService.js",
+          "fingerprint": "9eb1a7e0bf18539edd8a93b14b202b551bcd27cb00a506c21b66f9c04d439ae9"
+        },
+        {
+          "item_id": "e3c7cbe310881d0348390239b00c219aa81fd9d09b83da3f90f33ba209ea7b6a",
+          "path": "package.json",
+          "fingerprint": "034c32a1c89e488707f7a4792a632aeaa48b5d696126b20ce60e468b05dc5bfd"
+        },
+        {
+          "item_id": "e455c48e8f569e0f1aefefb4808839477a81cf630abe37924d56c8ecd780c401",
+          "path": "src/util/validation.js",
+          "fingerprint": "42aff307f8319357c42f559c4e766faaac3683fe0e13b5eea1f344a90f854169"
+        },
+        {
+          "item_id": "f447dacb43e842534f447e4e3eac43a5ab488e04eaffd82ad901882e7062e3bc",
+          "path": ".prettierrc.json",
+          "fingerprint": "29da5f484e70250629e29e3bfe7cde598e7282161f7775d9fa371abcd7cd73a3"
+        },
+        {
+          "item_id": "f699b2a855d929d1af63e44067d4ddcee3ae8673bafc64c74c6cd6f2b66a75b3",
+          "path": "src/services/statsService.js",
+          "fingerprint": "72e2a0fe3a4e98f7e9a5d069b31ef26c8e208b379a928a09939072d3cedd09c6"
+        },
+        {
+          "item_id": "f71c7453e0f01214e26af42d171937fe7bbaddef1a642a6a06958a08b2736b05",
+          "path": "src/routes/index.js",
+          "fingerprint": "2694f5e77fd53c3c705fee9ded5a9005c326faab910809c1431db7683ee4389d"
+        }
+      ],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": [
+        {
+          "item_id": "033e48b6e2a1db1a1235cd8469cf83cef9629c09db4a60bf5679ffa1328128df",
+          "path": "test/links.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "05eb8ed547c7b20cb909a0d1255b1dba01ba498192133d9072975e4dccd8e190",
+          "path": "test/validation.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "09d9fbfe0b41cde25574c0b95f43469a011cc03a5e09302497a47586a43777f4",
+          "path": "test/purge.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "0d7217360aa4f16223a342eb67bc7f3f7397ea95b3ffbf88ff754bd274b71d22",
+          "path": "docs/ARCHITECTURE.md",
+          "exclude_reason": "unsupported_ext"
+        },
+        {
+          "item_id": "5513e08b2a7a2bd1474a6452d9bc1b53c9b16406f75a10e4eaf4d17e219a038c",
+          "path": "README.md",
+          "exclude_reason": "unsupported_ext"
+        },
+        {
+          "item_id": "8112d8672ff4ae282f621573e0f0efa86d1c7eb97e3e1f4da8d8ce7231cf4ac7",
+          "path": "test/expiration.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "a05971de47a2b4735fad251d6d7927fee9b9feedfbe8c9f8a85e10e5eb0448c7",
+          "path": "docs/API.md",
+          "exclude_reason": "unsupported_ext"
+        },
+        {
+          "item_id": "a8134482b2588242c0702743e967688272d26284722fe154f8d9ea14009f0dd5",
+          "path": "test/linkService.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "b6904200a03c0ee5b42ddd1b1ff09f7d7f4d51b0fe50c3a3e3fe73a1913f7f2f",
+          "path": "test/codes.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "c21914761802dc7848d09f12f13cac7c0c645a8af405c16d16ccdb65861680d6",
+          "path": "test/stats.test.js",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "d7796349f2a769ec625392550ac86159f9c1d2436bdee1072c04080286a9e4e8",
+          "path": "test/fixtures/links.json",
+          "exclude_reason": "default_path"
+        },
+        {
+          "item_id": "f0c4e06bf49411d28af95b78d22fc0f6671f3edb97c12e0643ab5603cc31ed16",
+          "path": "src/store.js",
+          "exclude_reason": "deleted"
+        },
+        {
+          "item_id": "f37483121706b6f3d9a814cea381eff919ed66f117833b501a904d42be4c82e5",
+          "path": "CHANGELOG.md",
+          "exclude_reason": "unsupported_ext"
+        },
+        {
+          "item_id": "fca48c506402a03e35e439d03f9126d73c48989bdfab4e8a3774ebe5e7e09c4d",
+          "path": "src/routes/links.js",
+          "exclude_reason": "deleted"
+        }
+      ]
+    },
+    "elapsed_ms": 57570
+  }
+}

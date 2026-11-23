@@ -27,6 +27,8 @@ import {
 } from "./gitlab/services.js";
 import { renderDebugArtifactsHtml } from "./cli/debug-artifacts-html.js";
 
+const DEFAULT_OPENAI_MODEL = "gpt-5.4";
+
 function printHelp(): void {
   process.stdout.write(
     `gitlab-ai-review
@@ -53,7 +55,7 @@ Env vars:
   OPENAI_API_KEY (required for openai)  OpenAI API key.
   OPENAI_BASE_URL (optional)  Custom OpenAI-compatible API base URL.
   ANTHROPIC_API_KEY (required for anthropic)  Anthropic API key.
-  AI_MODEL      (optional)  Chat model. Default: gpt-4o-mini (openai), ${DEFAULT_ANTHROPIC_MODEL} (anthropic).
+  AI_MODEL      (optional)  Chat model. Default: ${DEFAULT_OPENAI_MODEL} (openai), ${DEFAULT_ANTHROPIC_MODEL} (anthropic).
   AI_REVIEW_CONCURRENCY (optional)  Same as --max-review-concurrency; the flag wins.
   AI_PROMPT_PROFILE (optional)  Prompt style: "default" | "weak". Default: default.
                               Use "weak" for small/quantized models — shorter prompts,
@@ -111,7 +113,7 @@ async function main(): Promise<void> {
   }
   const aiModel = envOrDefault(
     "AI_MODEL",
-    provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : "gpt-4o-mini",
+    provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL,
   );
   const promptProfile = parsePromptProfile(envOrUndefined("AI_PROMPT_PROFILE"));
   const allowProfileAutoDemote = envOrUndefined("AI_PROMPT_PROFILE") == null;

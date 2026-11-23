@@ -39,7 +39,7 @@ body:
     attributes:
       label: Model
       description: The value of `AI_MODEL`, or "default".
-      placeholder: gpt-4o-mini
+      placeholder: gpt-5.4
   - type: dropdown
     id: gitlab
     attributes:
