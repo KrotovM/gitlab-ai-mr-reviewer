@@ -151,21 +151,56 @@ The reviewer checks the code against what the MR says it does. Its title and des
 
 ## Benchmark
 
-Head-to-head against [Alibaba OpenCodeReview](https://github.com/alibaba/open-code-review) v1.8.10 (via its official GitLab CI recipe) on a demo MR with 4 seeded bugs: an auth bypass (`API_KEYS` unset → empty key accepted), a rate limiter whose window never resets, an unbounded per-IP counters Map, and a null-deref crash in a stats endpoint. Same MR, same commit range, same backends.
+gitlab-ai-review v1.0.49 head-to-head against [Alibaba OpenCodeReview](https://github.com/alibaba/open-code-review) v1.14.2 (via its official GitLab CI recipe) on two merge requests in a small Express demo service. Both tools review the same MR and commit range on the same three backends: gpt-5.4 (OpenAI API), Claude Opus 5.5 (Anthropic API, OpenCodeReview in its native Anthropic mode) and a self-hosted model on a single GPU.
+
+### 1. Seeded bugs (4 files, +57 lines)
+
+An MR adding API-key auth and per-IP rate limiting, with 4 seeded bugs: an auth bypass (`API_KEYS` unset → empty key accepted), a rate limiter whose window never resets, an unbounded per-IP counters Map, and a null-deref crash in a stats endpoint.
 
 | Tool | Model | Seeded bugs found | Noise (dups / off-target) | Tokens | LLM time |
 | --- | --- | --- | --- | --- | --- |
-| **gitlab-ai-review** | gpt-5.4 | 3 / 4 | 0 | 15.7k | ~17s |
-| OpenCodeReview | gpt-5.4 | 3 / 4 | 2 | 41.5k | ~11s |
-| **gitlab-ai-review** | self-hosted (single GPU) | **4 / 4** | **0** | 37.2k | 7m 24s |
-| OpenCodeReview | self-hosted (single GPU) | 3 / 4 | 8 (incl. 5 duplicates) | 151.8k | 11m 45s |
+| **gitlab-ai-review** | gpt-5.4 | 4 / 4 | **0** | **21.0k** | 31s |
+| OpenCodeReview | gpt-5.4 | 4 / 4 | 0 / 1 | 32.8k | 19s |
+| **gitlab-ai-review** | Claude Opus 5.5 | **4 / 4** (2 runs) | **0** | **38–43k** | 41–45s |
+| OpenCodeReview | Claude Opus 5.5 | 3 / 4 | 1 / 4 | 63.2k | 33s |
+| **gitlab-ai-review** | self-hosted (single GPU) | 3 / 4 | **0** | **39.5k** | 1m 29s |
+| OpenCodeReview | self-hosted (single GPU) | 3 / 4 | 1 / 4 | 114.3k | 4m 18s |
 
-Notes:
+- Every gitlab-ai-review finding points at the offending line. On the self-hosted model it missed the rate-limiter window bug; OpenCodeReview misread the same bug there as fixed-window bursts.
+- OpenCodeReview's off-target comments are style (`==`), theoretical concerns (string-compare timing, `trust proxy`) and design opinions.
 
-- On gpt-5.4 both tools found the same 3 bugs and both missed the memory leak. OpenCodeReview added two design opinions, one of which (severity "high") suggested removing the very auth feature the MR introduces.
-- On the self-hosted model the multi-pass pipeline (triage → per-file review → consolidate → verify) paid off: all 4 seeded bugs, zero noise. OpenCodeReview posted 11 comments: 3 unique real findings, 5 duplicates, and 3 off-target — its only rate-limiter comment misdiagnosed the bug, and several comments were attributed to the wrong file or line.
-- Weak-model reviews are output-bound on a single GPU: OpenCodeReview generated 40.2k output tokens vs our 18.5k, and consumed 6× our prompt tokens (111.6k vs 18.7k) — that difference is the wall-clock gap.
-- Methodology caveats: single run per cell on one MR; LLM variance applies.
+### 2. An AI-style MR (36 files, +1,623 lines)
+
+A typical generated MR: link expiration, custom aliases and owner-only stats, plus a refactor into layers, JSDoc everywhere, request logging, a 37-test suite (all green), API and architecture docs, an OpenAPI spec and a JSON fixture. It has 5 seeded defects:
+
+1. The default lifetime is 30 hours; the description promises 30 days.
+2. An expired link answers 404; the description promises 410 Gone. A test was adjusted to expect 404.
+3. The promised 365-day maximum for `ttlDays` is missing; a huge value crashes the handler with a 500.
+4. The owner check on stats is inverted: the owner gets 403, everyone else gets the stats.
+5. A caller still uses a function's old signature, so the alias-taken check never fires and anyone can take over an existing alias.
+
+Defects 1–3 contradict the MR description; the code, docs and spec never state those numbers.
+
+| Tool | Model | Seeded defects found | Noise (dups / off-target) | Tokens | LLM time |
+| --- | --- | --- | --- | --- | --- |
+| **gitlab-ai-review** | gpt-5.4 | **5 / 5** | **0** | **102.5k** | 1m 24s |
+| OpenCodeReview | gpt-5.4 | 3 / 5 | 1 / 8 | 210.4k | 58s |
+| **gitlab-ai-review** | Claude Opus 5.5 | **5 / 5** | **0** | **368.6k** | 3m 37s |
+| OpenCodeReview | Claude Opus 5.5 | 4 / 5 | 2 / 10 | 554.7k | 2m 8s |
+| **gitlab-ai-review** | self-hosted (single GPU) | **5 / 5** | **0** | 339.1k | 7m 36s |
+| OpenCodeReview | self-hosted (single GPU) | 2 / 5 | 1 / 2 | 303.3k | 8m 40s |
+
+- Triage drops the docs, the OpenAPI spec, the fixture, config files and deleted modules (8–11 of the 36 files) before the per-file pass.
+- Only gitlab-ai-review finds defect 2: the 410 promise exists only in the MR description. OpenCodeReview still infers defect 1 from the code (a default in hours next to `ttlDays` in days) and, on Opus, defect 3 through the crash.
+- Two of OpenCodeReview's gpt-5.4 comments are wrong about the code: that the MR has no tests (it has 37), and that a rounded uptime is fractional.
+
+### Methodology
+
+- One run per cell (Opus on the first MR: two runs, same result); LLM output varies between runs.
+- Found: the comment names the defect's actual cause; a misdiagnosis counts as off-target. Noise: everything else, split into duplicates of a found defect and off-target comments.
+- LLM time: for gitlab-ai-review the sum of its model calls from its report, for OpenCodeReview the elapsed time it reports. Per-file reviews run in parallel, so gitlab-ai-review's wall-clock time can be lower than the sum.
+- Tokens include prompt-cache reads, which cost a fraction of normal input: OpenCodeReview's Opus run on the second MR read 408.6k of its 536.8k input tokens from the cache.
+- gitlab-ai-review reads the MR title and description ([Stated intent](#stated-intent-mr-title-and-description)); OpenCodeReview reviews the git range only.
 
 ## Architecture
 
